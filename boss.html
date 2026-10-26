@@ -1,0 +1,1403 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"><!-- 禁止點輸入框時自動放大（畫面歪掉的元兇） -->
+<title>示範滷味・老闆看單</title>
+<!-- 📲 PWA：老闆「加到主畫面」後像獨立 App，不開 LINE 也能一點進店務台 -->
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#151110">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="示範滷味店務">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<!-- supabase-js：Supabase 官方的前端工具包（從 CDN 載入，不用安裝） -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  /* ====== 版面：深色金字，跟點餐頁同一家店的氣質 ====== */
+  :root{
+    --bg:#141210; --card:#1f1b17; --line:rgba(212,165,32,0.25);
+    --gold:#d4a520; --gold2:#e8c358; --goldlight:#f3dfa5;
+    --text:rgba(255,255,255,0.85); --dim:rgba(255,255,255,0.45);
+    --green:#7fc97f; --red:#e07a5f;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;touch-action:manipulation;}
+  /* 「$」專用字體：襯線體的 $ 是花體、看起來像美金符號——只接管 $ 這一個字元，改用平體 */
+  @font-face{
+    font-family:'CashSign';
+    src:local('PingFang TC'),local('Helvetica Neue'),local('Roboto'),local('Arial');
+    unicode-range:U+0024;
+  }
+  html{background:var(--bg);}
+  body{background:var(--bg);color:var(--text);font-family:"Noto Sans TC",system-ui,sans-serif;min-height:100vh;}
+  /* iPhone 橡皮筋回彈防露白：固定深色底墊，上下各多鋪一個螢幕高 */
+  body::before{content:'';position:fixed;left:0;right:0;top:-100vh;bottom:-100vh;z-index:-2;background:var(--bg);pointer-events:none;}
+  /* position:relative＝把 .wrap 設成「定位的基準點」，
+     裡面的登出鈕才知道要貼在「這一塊」的右上角，而不是整個螢幕 */
+  /* padding-top 疊加安全區：PWA 全螢幕時把標題推到瀏海/狀態列下方，一般瀏覽器 env 為 0 不受影響 */
+  .wrap{max-width:720px;margin:0 auto;padding:16px;padding-top:calc(16px + env(safe-area-inset-top));position:relative;}
+  /* 登出鈕獨立在右上角：離工具列那排按鈕遠遠的，忙起來才不會誤觸（回報） */
+  .btn-logout{position:absolute;top:16px;right:16px;z-index:5;
+    padding:7px 12px;border-radius:6px;border:1px solid var(--line);
+    background:rgba(0,0,0,0.25);color:var(--dim);font-size:12px;letter-spacing:1px;cursor:pointer;}
+  h1{font-family:'CashSign',"Noto Serif TC",serif;color:var(--gold2);font-size:22px;letter-spacing:4px;text-align:center;padding:14px 0 4px;}
+  .sub{text-align:center;color:var(--dim);font-size:12px;letter-spacing:2px;margin-bottom:16px;}
+
+  /* ====== 登入卡 ====== */
+  .login-card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:24px;max-width:360px;margin:40px auto;}
+  .login-card input{width:100%;padding:12px;margin-bottom:10px;border-radius:6px;border:1px solid var(--line);background:#141210;color:var(--text);font-size:16px;} /* ≥16px 防 iPhone 聚焦自動放大 */
+  input,textarea{font-size:16px;} /* 後台所有輸入框一律達標 */
+  .login-card button{width:100%;padding:12px;border:none;border-radius:6px;background:var(--gold);color:#1a1611;font-weight:900;font-size:15px;letter-spacing:3px;cursor:pointer;}
+  .login-card button:disabled{opacity:0.5;}
+  .login-err{color:var(--red);font-size:13px;text-align:center;margin-top:10px;min-height:18px;}
+
+  /* ====== 工具列 ====== */
+  .toolbar{display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap;}
+  .tab{padding:8px 14px;border-radius:20px;border:1px solid var(--line);background:none;color:var(--dim);font-size:13px;cursor:pointer;letter-spacing:1px;}
+  .tab.active{background:var(--gold);color:#1a1611;font-weight:900;border-color:var(--gold);}
+  .toolbar .spacer{flex:1;}
+  .btn-plain{padding:8px 14px;border-radius:6px;border:1px solid var(--line);background:none;color:var(--dim);font-size:13px;cursor:pointer;}
+
+  /* ====== 訂單卡 ====== */
+  .order-card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:12px;}
+  .order-card.is-new{border-color:var(--gold);box-shadow:0 0 12px rgba(212,165,32,0.15);}
+  .oc-head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
+  .oc-no{font-family:'CashSign',"Noto Serif TC",serif;font-size:20px;font-weight:900;color:var(--gold2);letter-spacing:2px;}
+  .oc-time{color:var(--dim);font-size:12px;}
+  .oc-cust{font-size:14px;margin-bottom:8px;}
+  .oc-cust a{color:var(--goldlight);text-decoration:none;}
+  .oc-sub{border-top:1px dashed var(--line);padding-top:8px;margin-top:8px;}
+  .oc-sub-name{color:var(--gold2);font-size:13px;font-weight:700;margin-bottom:4px;}
+  .oc-item{display:flex;justify-content:space-between;font-size:14px;padding:2px 0;}
+  .oc-item span:last-child{color:var(--gold2);font-weight:700;}
+  .oc-pref{color:var(--dim);font-size:12.5px;margin-top:4px;}
+  .oc-foot{display:flex;justify-content:space-between;align-items:center;border-top:1px solid var(--line);margin-top:10px;padding-top:10px;}
+  .oc-total{font-size:16px;font-weight:900;color:var(--gold2);}
+  .oc-actions{display:flex;gap:8px;}
+  .btn-done{padding:8px 16px;border:none;border-radius:6px;background:var(--green);color:#10240f;font-weight:900;font-size:13px;cursor:pointer;letter-spacing:1px;}
+  .btn-cancel{padding:8px 12px;border:1px solid var(--red);border-radius:6px;background:none;color:var(--red);font-size:13px;cursor:pointer;}
+  .badge{font-size:11px;padding:3px 10px;border-radius:12px;letter-spacing:1px;}
+  .badge.new{background:rgba(212,165,32,0.18);color:var(--gold2);}
+  .badge.cooking{background:rgba(255,140,66,0.18);color:#ff9d5c;}
+  .badge.done{background:rgba(127,201,127,0.15);color:var(--green);}
+  .badge.cancelled{background:rgba(224,122,95,0.15);color:var(--red);}
+  .btn-accept{padding:8px 16px;border:none;border-radius:6px;background:var(--gold);color:#1a1611;font-weight:900;font-size:13px;cursor:pointer;letter-spacing:1px;}
+  .btn-wait{padding:8px 14px;border:1px solid var(--gold);border-radius:6px;background:rgba(212,165,32,0.12);color:var(--gold2);font-weight:900;font-size:13px;cursor:pointer;}
+  .oc-pickup{font-size:12px;color:#ff9d5c;margin-left:10px;letter-spacing:1px;}
+
+  /* ====== 🚫 棄單／⚠️ 高額警示 ====== */
+  .oc-warn{background:#3a2a12;border:1px solid #7a5a20;color:#ffc46b;font-size:12px;font-weight:900;
+           padding:6px 10px;border-radius:6px;margin-bottom:8px;letter-spacing:1px;}
+  .order-card.is-noshow{opacity:.72;}
+  .ns-desc{font-size:13px;color:var(--dim);line-height:1.8;margin-bottom:14px;}
+  .ns-desc b{color:#ffc46b;}
+  .ns-opt{display:block;width:100%;text-align:left;padding:12px 14px;margin-bottom:8px;border-radius:8px;
+          border:1px solid var(--line);background:#241f18;color:#e8dfd0;font-size:14px;cursor:pointer;line-height:1.6;}
+  .ns-opt:hover{border-color:var(--gold);}
+  .ns-opt small{display:block;color:var(--dim);font-size:12px;margin-top:2px;}
+
+  /* ====== 📱 LINE 訊息模擬預覽 ====== */
+  .line-preview-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.65);display:flex;align-items:center;justify-content:center;z-index:99;padding:16px;}
+  .line-preview{background:var(--card);border:1px solid var(--line);border-radius:10px;max-width:400px;width:100%;padding:18px;}
+  .lp-title{font-size:14px;font-weight:900;color:var(--gold2);letter-spacing:1px;margin-bottom:12px;text-align:center;}
+  .lp-chat{background:#7494c0;border-radius:8px;padding:16px 14px;}
+  .lp-bubble{background:#fff;color:#222;border-radius:14px;border-top-left-radius:4px;padding:12px 14px;font-size:14px;line-height:1.7;max-width:90%;box-shadow:0 1px 2px rgba(0,0,0,0.2);}
+  .lp-note{font-size:12px;color:var(--dim);margin-top:12px;line-height:1.6;text-align:center;}
+  .lp-close{display:block;margin:14px auto 0;padding:9px 32px;border:none;border-radius:6px;background:var(--gold);color:#1a1611;font-weight:900;font-size:14px;letter-spacing:2px;cursor:pointer;}
+
+  /* ====== ✅ 確認接單彈窗 ====== */
+  .cm-label{font-size:12px;color:var(--dim);letter-spacing:2px;margin-bottom:8px;text-align:center;}
+  .cm-presets{display:flex;gap:8px;justify-content:center;margin-bottom:12px;}
+  .cm-preset{flex:1;padding:12px 0;font-size:15px;}
+  .cm-preset.active{background:var(--gold);color:#1a1611;}
+  .cm-stepper{display:flex;align-items:center;justify-content:center;gap:14px;margin-bottom:12px;}
+  .cm-step{width:44px;height:44px;border-radius:50%;border:1px solid var(--line);background:none;color:var(--gold2);font-size:22px;font-weight:900;cursor:pointer;}
+  .cm-mins{font-family:'CashSign',"Noto Serif TC",serif;font-size:28px;font-weight:900;color:var(--gold2);min-width:52px;text-align:center;}
+  .cm-pickup{text-align:center;font-size:14px;color:#ff9d5c;letter-spacing:1px;margin-bottom:14px;min-height:20px;}
+  .cm-actions{display:flex;gap:10px;}
+  .empty{text-align:center;color:var(--dim);padding:50px 0;font-size:14px;letter-spacing:2px;}
+  .hidden{display:none;}
+
+  /* ====== 🍢 菜單管理（售完/恢復） ====== */
+  .menu-mgr{background:var(--card);border:1px solid var(--line);border-radius:10px;max-width:460px;width:100%;max-height:82vh;display:flex;flex-direction:column;padding:18px;}
+  .mm-list{overflow-y:auto;margin-top:6px;padding-right:4px;}
+  .mm-cat{color:var(--gold2);font-size:13px;font-weight:700;letter-spacing:2px;margin:12px 0 4px;border-bottom:1px dashed var(--line);padding-bottom:4px;}
+  .mm-row{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 2px;font-size:14px;}
+  .mm-row.off .mm-name{color:var(--dim);text-decoration:line-through;}
+  .mm-price{color:var(--dim);font-size:12px;margin-left:8px;}
+  .mm-btn{min-width:84px;padding:6px 12px;border-radius:14px;font-size:12px;cursor:pointer;letter-spacing:1px;border:1px solid rgba(127,201,127,0.5);background:rgba(127,201,127,0.1);color:var(--green);}
+  .mm-btn.off{border-color:var(--red);color:var(--red);background:rgba(224,122,95,0.12);}
+  .mm-btn:disabled{opacity:0.5;}
+
+  /* ====== ✏️ 訂單編輯器 ====== */
+  .btn-edit{padding:8px 12px;border:1px solid var(--gold);border-radius:6px;background:none;color:var(--gold2);font-size:13px;cursor:pointer;}
+  .ed-list{overflow-y:auto;max-height:44vh;margin:4px 0;}
+  .ed-sub-name{color:var(--gold2);font-size:13px;font-weight:700;margin:8px 0 2px;}
+  .ed-row{display:flex;align-items:center;gap:8px;padding:7px 0;font-size:14px;border-bottom:1px dashed rgba(212,165,32,0.15);}
+  .ed-name{flex:1;line-height:1.4;}
+  .ed-price{color:var(--dim);font-size:12px;}
+  .ed-step{width:30px;height:30px;border-radius:50%;border:1px solid var(--line);background:none;color:var(--gold2);font-size:16px;font-weight:900;cursor:pointer;}
+  .ed-step:disabled{opacity:0.3;cursor:not-allowed;}
+  .ed-qty{min-width:22px;text-align:center;font-weight:700;}
+  .ed-del{border:1px solid var(--red);background:none;color:var(--red);border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:13px;}
+  .ed-add-bar{display:flex;gap:8px;margin:10px 0 4px;}
+  .ed-add-bar select{flex:1;padding:8px;border-radius:6px;border:1px solid var(--line);background:#141210;color:var(--text);font-size:13px;max-width:100%;}
+  .ed-total{text-align:right;font-size:15px;font-weight:900;color:var(--gold2);margin:8px 0;}
+
+  /* ====== 📊 老闆日報 ====== */
+  .dr-nav{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:10px;}
+  .dr-date{font-family:'CashSign',"Noto Serif TC",serif;font-size:16px;font-weight:900;color:var(--gold2);letter-spacing:1px;}
+  .dr-stats{display:flex;gap:8px;margin-bottom:12px;}
+  .dr-stat{flex:1;background:rgba(212,165,32,0.08);border:1px solid var(--line);border-radius:8px;padding:8px 4px;text-align:center;}
+  .dr-stat b{display:block;font-size:18px;color:var(--gold2);}
+  .dr-stat span{font-size:11px;color:var(--dim);letter-spacing:1px;}
+  .dr-sec{font-size:12px;color:var(--gold3,#b8934a);letter-spacing:2px;margin:10px 0 4px;font-weight:700;}
+  .dr-rank-row{display:flex;justify-content:space-between;padding:5px 2px;font-size:14px;border-bottom:1px dashed rgba(212,165,32,0.12);}
+  .dr-order-row{font-size:12.5px;color:var(--dim);padding:6px 2px;border-bottom:1px dashed rgba(212,165,32,0.1);line-height:1.55;}
+  .dr-order-row b{color:var(--gold2);}
+  .dr-order-row.cancelled{opacity:0.5;}
+  .dr-order-row.cancelled b{text-decoration:line-through;}
+  .dr-actions{display:flex;gap:8px;margin-top:12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- 登出縮在右上角，登入後才出現（沒登入時按了也沒意義） -->
+  <button id="logoutBtn" class="btn-logout hidden" onclick="doLogout()">登出</button>
+  <h1>🍢 示範滷味・看單台</h1>
+  <div class="sub">BOSS ONLY・訂單即時瀏覽</div>
+
+  <!-- ========== 登入區：老闆專用門禁 ========== -->
+  <div id="loginView" class="login-card">
+    <input id="email" type="email" placeholder="老闆帳號（email）" autocomplete="username">
+    <input id="password" type="password" placeholder="密碼" autocomplete="current-password">
+    <button id="loginBtn" onclick="doLogin()">登 入</button>
+    <div class="login-err" id="loginErr"></div>
+  </div>
+
+  <!-- ========== 看單區：登入後才出現 ========== -->
+  <div id="boardView" class="hidden">
+    <div class="toolbar">
+      <button class="tab active" data-f="new" onclick="setFilter('new',this)">🆕 新單</button>
+      <button class="tab" data-f="confirmed" onclick="setFilter('confirmed',this)">🔥 製作中</button>
+      <button class="tab" data-f="done" onclick="setFilter('done',this)">✅ 已完成</button>
+      <button class="tab" data-f="all" onclick="setFilter('all',this)">全部</button>
+      <span class="spacer"></span>
+      <button class="btn-plain" onclick="openShopSettings()">🚪 營業</button>
+      <button class="btn-plain" onclick="openDailyReport()">📊 日報</button>
+      <button class="btn-plain" onclick="openMenuManager()">🍢 菜單</button>
+      <button class="btn-plain" id="refreshBtn" onclick="refreshOrders()">↻ 重新整理</button>
+    </div>
+    <div id="orderList"><div class="empty">載入中…</div></div>
+  </div>
+</div>
+
+<script>
+/* ================================================================
+   ☁️ 連上同一本雲端訂單簿（跟 index.html 同一組地址＋訪客證）
+   老闆多一道門禁：要先登入（Supabase Auth），RLS 才放行「看單／改單」。
+   ================================================================ */
+const SUPABASE_URL = 'https://YOUR_PROJECT.supabase.co';
+const SUPABASE_KEY = 'YOUR_SUPABASE_PUBLISHABLE_KEY';
+// 明確開啟「記住登入＋自動續期」（預設本就開，這裡固定住＋給穩定的 storageKey，
+// 讓桌面 App 開著或重開都盡量沿用登入，不用一直重打密碼）
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true, storageKey: 'demo-boss-auth' }
+});
+
+let currentFilter = 'new';   // 目前的分頁：new＝新單 / done＝已完成 / all＝全部
+let pollTimer = null;        // 自動刷新的計時器
+
+/* ---------- 登入／登出 ---------- */
+async function doLogin() {
+  const btn = document.getElementById('loginBtn');
+  btn.disabled = true;
+  document.getElementById('loginErr').textContent = '';
+  // 拿 email＋密碼去門禁室換通行證（之後每次讀資料都會自動帶著）
+  const { error } = await db.auth.signInWithPassword({
+    email: document.getElementById('email').value.trim(),
+    password: document.getElementById('password').value
+  });
+  btn.disabled = false;
+  if (error) {
+    document.getElementById('loginErr').textContent = '登入失敗：帳號或密碼不對';
+    return;
+  }
+  try { localStorage.setItem('demo-boss-email', document.getElementById('email').value.trim()); } catch(e){}  // 記住 email，重登只需打密碼
+  showBoard();
+}
+// 開頁時帶入上次登入的 email（少打一欄）
+try { const _be = localStorage.getItem('demo-boss-email'); if (_be) { const _e = document.getElementById('email'); if (_e) _e.value = _be; } } catch(e){}
+
+async function doLogout() {
+  await db.auth.signOut();
+  clearInterval(pollTimer);
+  if (rtChannel) { db.removeChannel(rtChannel); rtChannel = null; }
+  document.getElementById('boardView').classList.add('hidden');
+  document.getElementById('loginView').classList.remove('hidden');
+  document.getElementById('logoutBtn').classList.add('hidden');  // 回到登入畫面就把登出鈕收起來
+}
+
+/* 進入看單模式：Realtime 即時廣播當主力（新單/改單瞬間跳出），
+   輪詢降為 60 秒保底（萬一廣播斷線也不漏單）*/
+function showBoard() {
+  document.getElementById('loginView').classList.add('hidden');
+  document.getElementById('boardView').classList.remove('hidden');
+  document.getElementById('logoutBtn').classList.remove('hidden');  // 登入成功才亮出右上角登出鈕
+  loadOrders();
+  startRealtime();
+  clearInterval(pollTimer);
+  pollTimer = setInterval(loadOrders, 60000);
+  handleBossDeepLink();   // 圖文選單 4 格：依 ?tab= 直開對應面板
+}
+
+/* 圖文選單深層連結：老闆從 Rich Menu 點某格 → 網址帶 ?tab= → 進看單台後自動開對應面板
+   tab=menu→菜單管理 / tab=settings→營業設定 / tab=report→日報 / 無或 orders→預設看單列表 */
+function handleBossDeepLink() {
+  try {
+    const qs = new URLSearchParams(location.search);
+    let tab = qs.get('tab');
+    // LIFF 常把原始 query 包進 liff.state（例如 ?liff.state=%3Ftab%3Dmenu）→ 解一層
+    if (!tab) {
+      const st = qs.get('liff.state');
+      if (st) tab = new URLSearchParams(st.replace(/^[?#]/, '')).get('tab');
+    }
+    // 再保險：hash 也看一下（少數情況參數會落在 #）
+    if (!tab && location.hash) {
+      tab = new URLSearchParams(location.hash.replace(/^[?#]/, '')).get('tab');
+    }
+    if (!tab) return;
+    setTimeout(() => {   // 等看單台畫完再開面板
+      if (tab === 'menu') openMenuManager();
+      else if (tab === 'settings') openShopSettings();
+      else if (tab === 'report') openDailyReport();
+    }, 400);
+  } catch (e) { /* 跳轉失敗無傷，看單列表照常 */ }
+}
+
+/* 🔕 店務台提示音已整組移除——改靠 LINE 通知，不需要額外開著分頁聽提示音
+   為什麼做了又拿掉，記錄一下免得以後有人再提一次：
+     ① 網頁提示音有天生上限——【頁面關掉或手機鎖屏，JavaScript 就被暫停】，
+        等於老闆必須全程開著店務台才有用，而他不會這樣用。
+     ② 就算做到極限（方波和聲＋壓縮器＋語音播報＋持續呼叫＋閃爍橫幅），
+        也繞不過上面那個限制。
+     ③ #015 的真正解藥是【保底重推】（超過 3 分鐘沒接單自動補推），
+        那條在伺服器上跑，不管老闆手機開著關著都有效。
+   要恢復的話：git 歷史 commit 2ba2fb4 前後有完整實作。 */
+
+/* ---------- ⚡ Realtime 即時跳單（M0.9-C） ----------
+   訂閱 orders 表的即時廣播：資料庫一有動靜馬上重抓列表。
+   廣播一樣過 RLS 門禁——沒登入的人就算訂閱了也收不到訂單資料。 */
+let rtChannel = null;
+function startRealtime() {
+  if (rtChannel) return;
+  rtChannel = db.channel('orders-live')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, () => loadOrders())
+    .subscribe();
+}
+
+/* 打開頁面時：如果之前登入過還沒過期，直接進看單台 */
+db.auth.getSession().then(({ data }) => { if (data.session) showBoard(); });
+
+/* 手動重新整理：加上看得見的回饋——沒回饋的成功看起來跟壞掉一樣 */
+async function refreshOrders() {
+  const btn = document.getElementById('refreshBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ 更新中…'; }
+  await loadOrders();
+  if (btn) {
+    btn.textContent = '✅ 已是最新';
+    setTimeout(() => { btn.textContent = '↻ 重新整理'; btn.disabled = false; }, 1200);
+  }
+}
+
+/* ---------- 讀訂單 ---------- */
+function setFilter(f, el) {
+  currentFilter = f;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  loadOrders();
+}
+
+async function loadOrders() {
+  // 跟資料庫要最近 100 筆。
+  // 「製作中」分頁按取餐時間排（快到期的在最上面，老闆一眼知道先滷哪張）；
+  // 其他分頁照下單時間新到舊。
+  let query = db.from('orders').select('*').limit(100);
+  if (currentFilter === 'new')            query = query.eq('status', 'new').order('created_at', { ascending: false });
+  else if (currentFilter === 'confirmed') query = query.eq('status', 'confirmed').order('pickup_at', { ascending: true, nullsFirst: false });
+  else if (currentFilter === 'done')      query = query.eq('status', 'done').order('created_at', { ascending: false });
+  else                                    query = query.order('created_at', { ascending: false });
+
+  const { data, error } = await query;
+  const list = document.getElementById('orderList');
+  if (error) { list.innerHTML = '<div class="empty">讀取失敗，請按「重新整理」再試</div>'; return; }
+  if (!data.length) { list.innerHTML = '<div class="empty">目前沒有訂單 🍃</div>'; return; }
+  list.innerHTML = data.map(renderCard).join('');
+}
+
+/* 把一筆訂單畫成一張卡片 */
+function renderCard(r) {
+  // 資料庫存的是世界標準時間，顯示時轉成台北時間
+  const t = new Date(r.created_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false });
+
+  // items 欄位裡是一包 JSON：每張子訂單的品項＋偏好
+  let body = '';
+  (r.items || []).forEach(o => {
+    const rows = (o.items || []).map(v =>
+      '<div class="oc-item"><span>' + esc(v.name) + ' × ' + v.qty + '</span><span>$' + (v.price * v.qty) + '</span></div>'
+    ).join('');
+    const prefs = formatPrefs(o.prefs);
+    body += '<div class="oc-sub">'
+      + (o.name ? '<div class="oc-sub-name">' + esc(o.name) + '</div>' : '')
+      + rows
+      + (prefs ? '<div class="oc-pref">🌿 ' + prefs + '</div>' : '')
+      + '</div>';
+  });
+
+  const badge = r.status === 'new' ? '<span class="badge new">新單</span>'
+              : r.status === 'confirmed' ? '<span class="badge cooking">製作中</span>'
+              : r.status === 'done' ? (r.no_show ? '<span class="badge cancelled">🚫 棄單</span>'
+                                                 : '<span class="badge done">已完成</span>')
+              : '<span class="badge cancelled">已取消</span>';
+
+  // 新單 → 確認接單（先選等候時間）；製作中 → 完成
+  let actions;
+  if (r.status === 'new') {
+    actions = '<div class="oc-actions">'
+      + '<button class="btn-cancel" onclick="setStatus(\'' + r.id + '\',\'cancelled\')">取消</button>'
+      + '<button class="btn-edit" onclick="openEditModal(\'' + r.id + '\')">✏️ 編輯</button>'
+      + '<button class="btn-accept" onclick="openConfirmModal(\'' + r.id + '\',\'' + esc(r.order_no) + '\')">✅ 確認接單</button>'
+      + '</div>';
+  } else if (r.status === 'confirmed') {
+    actions = '<div class="oc-actions">'
+      + '<button class="btn-cancel" onclick="setStatus(\'' + r.id + '\',\'cancelled\')">取消</button>'
+      + '<button class="btn-edit" onclick="openEditModal(\'' + r.id + '\')">✏️ 編輯</button>'
+      + '<button class="btn-wait" onclick="openConfirmModal(\'' + r.id + '\',\'' + esc(r.order_no) + '\',true)">⏰ 改時間</button>'
+      + '<button class="btn-done" onclick="setStatus(\'' + r.id + '\',\'done\')">完 成</button>'
+      + '</div>';
+  } else if (r.status === 'done') {
+    // 已完成的單才有「標記棄單」——因為棄單幾乎都是【做好了才發現沒來領】。
+    // 已經標記過的，改成提供「取消標記」的回頭路（老闆會誤按，也會有客人事後來領）。
+    actions = '<div class="oc-actions">' + badge
+      + (r.no_show
+        ? '<button class="btn-edit" onclick="unmarkNoShow(\'' + r.id + '\',\'' + esc(r.order_no) + '\')">↩️ 取消棄單註記</button>'
+        : '<button class="btn-cancel" onclick="openNoShowModal(\'' + r.id + '\',\'' + esc(r.order_no) + '\')">🚫 標記棄單</button>')
+      + '</div>';
+  } else {
+    actions = badge;
+  }
+
+  // 已確認的單：標題列顯示取餐時間，老闆一眼知道哪張快到期
+  const pickupTag = (r.status === 'confirmed' && r.pickup_at)
+    ? '<span class="oc-pickup">⏰ ' + fmtHM(r.pickup_at) + ' 取餐</span>' : '';
+
+  // ⚠️ 高額連續下單：place-order 在寫入時標記的，這裡只負責讓老闆看見
+  const hvTag = r.high_value ? '<div class="oc-warn">⚠️ 高額連續下單，請留意</div>' : '';
+
+  // ⚡ 應急單：LINE 掛掉期間從備援網址進來的單，【沒有 LINE 身分】
+  //    → 這張單在聊天室找不到人，有問題只能打電話。老闆必須一眼看見。
+  const emgTag = r.emergency
+    ? '<div class="oc-warn" style="background:#3a1f12;border-color:#7a4020;color:#ffb08a;">'
+      + '⚡ 應急單 · 客人沒有 LINE 身分，有事請直接電聯</div>' : '';
+
+  return '<div class="order-card' + (r.status === 'new' ? ' is-new' : '') + (r.no_show ? ' is-noshow' : '') + '">'
+    + emgTag + hvTag
+    + '<div class="oc-head"><span class="oc-no">#' + esc(r.order_no) + pickupTag + '</span><span class="oc-time">' + t + '</span></div>'
+    + '<div class="oc-cust">👤 ' + esc(r.customer_name) + '　📞 <a href="tel:' + esc(r.customer_phone) + '">' + esc(r.customer_phone) + '</a></div>'
+    + body
+    + '<div class="oc-foot"><span class="oc-total">合計 $' + r.total + '</span>' + actions + '</div>'
+    + '</div>';
+}
+
+/* 口味偏好 JSON → 中文一行字（跟點餐頁的顯示規則一致） */
+function formatPrefs(p) {
+  if (!p) return '';
+  const out = [];
+  // 蔥蒜胡椒預設加，只標客人選「不要」的（加是標配不印）
+  if (p.scallion === 'no') out.push('不要蔥');
+  if (p.garlic === 'no') out.push('不要蒜');
+  if (p.pepper === 'no') out.push('不要胡椒');
+  if (p.spicy === 'yes' && p.spiceLevel) out.push('辣度：' + p.spiceLevel);
+  else if (p.spicy === 'side') out.push(p.spiceLevel ? '辣度：' + p.spiceLevel + '（另外裝）' : '辣另外裝');
+  else if (p.spicy === 'no') out.push('不加辣');
+  if (p.utensils === 'yes') out.push('要餐具🥢'); else if (p.utensils === 'no') out.push('不用餐具');
+  if (p.note) out.push('備註：' + esc(p.note));
+  return out.join('、');
+}
+
+/* ---------- 改訂單狀態（完成／取消） ---------- */
+async function setStatus(id, status) {
+  if (status === 'cancelled' && !confirm('確定要取消這張訂單嗎？')) return;
+  const { error } = await db.from('orders').update({ status }).eq('id', id);
+  if (error) { alert('更新失敗，請重試'); return; }
+  loadOrders();
+}
+
+/* ---------- 確認接單流程 ---------- */
+
+/* ============================================================
+   🚫 棄單註記
+
+   為什麼棄單要跟「取消」分成兩顆鈕：
+     取消 ＝ 老闆知情（缺料、客人來電說不要了）→ 沒有損失，也不該怪客人
+     棄單 ＝ 做好了、客人沒來領 → 有實際成本損失，而且要防再犯
+   混在一起的話，日報會分不清「沒做」跟「做了賠掉」，也會冤枉臨時取消的客人。
+
+   為什麼放在【已完成】的單上：真實情況幾乎都是「滷都滷好了才發現人沒來」。
+   ============================================================ */
+function openNoShowModal(id, orderNo) {
+  const overlay = document.createElement('div');
+  overlay.className = 'line-preview-overlay';
+  overlay.id = 'noShowModal';
+  overlay.innerHTML =
+    '<div class="line-preview">'
+    + '<div class="lp-title">🚫 標記棄單 #' + orderNo + '</div>'
+    + '<div class="ns-desc">'
+    +   '標記後會做三件事：<br>'
+    +   '① 這張單<b>不計入營業額</b>，改列「棄單損失」<br>'
+    +   '② 這位客人的<b>線上訂餐暫停 30 天</b>（可隨時解除）<br>'
+    +   '③ 現場購買不受影響'
+    + '</div>'
+    + '<div class="ns-desc" style="margin-bottom:8px;">要怎麼告知客人？</div>'
+    + '<button class="ns-opt" onclick="markNoShow(\'' + id + '\',\'' + orderNo + '\',\'push\')">'
+    +   '📩 系統自動通知他<small>會扣 1 則訊息額度，語氣客氣、附申訴管道</small></button>'
+    + '<button class="ns-opt" onclick="markNoShow(\'' + id + '\',\'' + orderNo + '\',\'copy\')">'
+    +   '📋 複製訊息，我自己貼<small>不扣額度，你在聊天室貼上就好</small></button>'
+    + '<button class="ns-opt" onclick="markNoShow(\'' + id + '\',\'' + orderNo + '\',\'none\')">'
+    +   '🤐 先不通知<small>只做標記與暫停，什麼都不發</small></button>'
+    + '<div class="cm-actions" style="margin-top:12px;">'
+    +   '<button class="btn-plain" style="flex:1;padding:11px;" onclick="document.getElementById(\'noShowModal\').remove()">↩ 返回，不標記</button>'
+    + '</div>'
+    + '</div>';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+/* 給老闆自己貼的版本（跟系統自動發的內容一致，客人看到的說法才不會兩套） */
+function noShowText(orderNo) {
+  return '您好，您訂購的 #' + orderNo + ' 餐點已製作完成，但未前往取餐。\n\n'
+    + '餐點已無法保存，這次的損失由店家承擔。為維持出餐品質，'
+    + '您的線上訂餐將暫停 30 天，期間仍歡迎現場購買。\n\n'
+    + '若有誤會或特殊狀況，請直接回覆這則訊息與我們聯繫，謝謝您 🙏';
+}
+
+async function markNoShow(id, orderNo, notify) {
+  document.getElementById('noShowModal')?.remove();
+
+  // 先拿到這張單的客人身分（要用來封鎖）
+  const { data: r, error: e1 } = await db.from('orders')
+    .select('id, order_no, line_user_id, total, status').eq('id', id).single();
+  if (e1 || !r) { alert('讀取訂單失敗，請重試'); return; }
+  if (r.status !== 'done') { alert('只有「已完成」的訂單可以標記棄單'); return; }
+
+  // ① 標記訂單（no_show_notify 決定資料庫的通知觸發器要不要動作）
+  const { error: e2 } = await db.from('orders')
+    .update({ no_show: true, no_show_notify: notify === 'push' })
+    .eq('id', id).eq('status', 'done');
+  if (e2) { alert('標記失敗：' + e2.message); return; }
+
+  // ② 封鎖 30 天。存「到期時間」而不是「封鎖中與否」→ 時間到自然失效，
+  //    不需要任何排程去解封（少一個會壞掉的零件）。
+  //    ⚠️ 起改走 block_customer() 函式，不再直接寫 blocklist 表。
+  //    原因：原本的 RLS 是「任何 authenticated 都能寫」，而 authenticated 的意思是
+  //    「任何登入者」不是「老闆」——目前自助註冊關著所以攻擊前提不成立，
+  //    但不該把安全性押在另一個設定上（哪天有人為了別的需求打開註冊就破了）。
+  //    改成受控函式之後，能做的只有「封鎖某人 30 天」這一件事，天數也改不了。
+  if (r.line_user_id) {
+    const { error: e3 } = await db.rpc('block_customer', {
+      p_line_user_id: r.line_user_id, p_order_no: r.order_no,
+    });
+    if (e3) console.error('封鎖寫入失敗：', e3);
+  }
+
+  // ③ 老闆選「自己貼」→ 幫他把字複製好
+  if (notify === 'copy') {
+    try {
+      await navigator.clipboard.writeText(noShowText(orderNo));
+      alert('✅ 已標記棄單\n\n訊息已複製，到 LINE 聊天室貼上傳給客人就好 📋');
+    } catch (err) {
+      prompt('已標記棄單。請複製下面這段訊息傳給客人：', noShowText(orderNo));
+    }
+  } else {
+    alert('✅ 已標記棄單 #' + orderNo
+      + (notify === 'push' ? '\n\n已通知客人，並暫停他的線上訂餐 30 天。' : '\n\n已暫停他的線上訂餐 30 天（未發送通知）。'));
+  }
+  loadOrders();
+}
+
+/* 誤按了、或客人事後來領了 → 回頭路：取消註記並解除封鎖 */
+async function unmarkNoShow(id, orderNo) {
+  if (!confirm('要取消 #' + orderNo + ' 的棄單註記嗎？\n\n這張單會重新計入營業額，客人的封鎖也會一併解除。')) return;
+  const { data: r } = await db.from('orders').select('line_user_id').eq('id', id).single();
+  const { error } = await db.from('orders')
+    .update({ no_show: false, no_show_notify: false }).eq('id', id);
+  if (error) { alert('取消失敗：' + error.message); return; }
+  if (r?.line_user_id) await db.rpc('unblock_customer', { p_line_user_id: r.line_user_id });
+  alert('✅ 已取消棄單註記，客人可以正常線上訂餐了');
+  loadOrders();
+}
+
+/* 按「確認接單」→ 彈出獨立小視窗選等候時間
+   （做成彈窗有兩個理由：①15 秒自動刷新洗不掉它 ②有明確的返回、點背景＝取消，不會誤觸）*/
+let _cmMins = 30;        // 彈窗目前選的分鐘數
+let _cmUpdate = false;   // false＝首次確認接單／true＝已確認後修改取餐時間
+
+function openConfirmModal(id, orderNo, isUpdate, keepMins) {
+  if (!keepMins) _cmMins = 30; // 從預覽按「返回」回來時保留剛選的分鐘數，其餘情況重設
+  _cmUpdate = !!isUpdate;
+  const overlay = document.createElement('div');
+  overlay.className = 'line-preview-overlay';
+  overlay.id = 'confirmModal';
+  overlay.innerHTML =
+    '<div class="line-preview">'
+    + '<div class="lp-title">' + (_cmUpdate ? '⏰ 修改取餐時間 #' : '✅ 確認接單 #') + orderNo + '</div>'
+    + '<div class="cm-label">等候時間</div>'
+    + '<div class="cm-presets">'
+    +   [25, 30, 35].map(m => '<button class="btn-wait cm-preset" data-m="' + m + '" onclick="cmSetMins(' + m + ')">' + m + '分</button>').join('')
+    + '</div>'
+    + '<div class="cm-stepper">'
+    +   '<button class="cm-step" onclick="cmStep(-5)">−</button>'
+    +   '<span class="cm-mins" id="cmMins">30</span><span style="color:var(--dim);font-size:13px;">分鐘</span>'
+    +   '<button class="cm-step" onclick="cmStep(5)">＋</button>'
+    + '</div>'
+    + '<div class="cm-pickup" id="cmPickup"></div>'
+    + '<div class="cm-actions">'
+    +   '<button class="btn-plain" style="flex:1;padding:11px;" onclick="document.getElementById(\'confirmModal\').remove()">↩ 返回</button>'
+    +   '<button class="btn-accept" style="flex:2;padding:11px;" onclick="cmSubmit(\'' + id + '\')">' + (_cmUpdate ? '更新時間' : '確認送出') + '</button>'
+    + '</div>'
+    + '</div>';
+  // 點背景＝取消（什麼都不會發生，不會誤選）
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  cmRefresh();
+}
+
+function cmSetMins(m) { _cmMins = m; cmRefresh(); }
+function cmStep(d) {
+  _cmMins = Math.min(180, Math.max(5, _cmMins + d)); // 5 分鐘一格，5～180 分之間
+  cmRefresh();
+}
+function cmRefresh() {
+  document.getElementById('cmMins').textContent = _cmMins;
+  // 即時預覽取餐時間，老闆按下去前就知道會告訴客人幾點
+  const pickup = new Date(Date.now() + _cmMins * 60000);
+  document.getElementById('cmPickup').textContent = '客人取餐時間 → ' + fmtHM(pickup.toISOString());
+  // 快選鍵高亮目前選中的
+  document.querySelectorAll('.cm-preset').forEach(b =>
+    b.classList.toggle('active', parseInt(b.dataset.m) === _cmMins));
+}
+/* 選完時間按「確認送出」→ 直接生效
+   （拿掉中間那層「客人將收到的訊息」預覽）
+
+   為什麼可以拿掉：客人主動通知已關閉（CUSTOMER_PUSH_ENABLED = false），
+   那則訊息【根本不會發出去】——預覽一個不存在的東西，只是讓老闆多按一次，
+   還會讓他誤以為客人收到了通知。
+
+   把關並沒有變少：選時間的視窗上就即時顯示「客人取餐時間 → HH:MM」，
+   老闆按下去之前就看得到結果；點背景或按返回都能取消。
+
+   ⚠️ 哪天把客人推播打開，這層預覽要跟著回來（改回呼叫 showLinePreview）。 */
+async function cmSubmit(id) {
+  document.getElementById('confirmModal')?.remove();
+  await commitConfirm(id);
+}
+
+/* 預覽按「知道了」→ 真正生效：寫入確認狀態＋時間（送出後就不再改時間） */
+async function commitConfirm(id) {
+  const now = new Date();
+  const pickup = new Date(now.getTime() + _cmMins * 60000); // 以按下知道了的時刻起算，最準
+  const patch = _cmUpdate
+    ? { wait_minutes: _cmMins, pickup_at: pickup.toISOString() }  // 改時間模式：不動狀態與首次確認時間
+    : { status: 'confirmed', confirmed_at: now.toISOString(), wait_minutes: _cmMins, pickup_at: pickup.toISOString() };
+  const { error } = await db.from('orders').update(patch).eq('id', id);
+  if (error) { alert('送出失敗，請重試'); return; }
+  loadOrders();
+}
+
+/* 世界標準時間 → 台北時間 HH:MM */
+function fmtHM(iso) {
+  return new Date(iso).toLocaleTimeString('zh-TW',
+    { timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+/* ---------- 📱 通知訊息預覽（起為真發送） ----------
+   M1 已通電：按「知道了」寫入 confirmed 後，資料庫觸發器會呼叫
+   line-push 雲端函式，把「同一份訊息」真的推進綁定 LINE 的客人手機。
+   訊息內容以下面 buildCustomerMessage 為準（與 line-push/index.ts 同步維護）。
+   未綁定 LINE 的客人不受影響，照舊用查詢頁看狀態（優雅降級）。 */
+/* 品項條列（對帳版）：一行一項＋金額（與 line-push 同步維護）*/
+function itemLines(r) {
+  return (r.items || []).flatMap(o => (o.items || []).map(v => '・' + v.name + ' ×' + v.qty + '　$' + (v.price * v.qty))).join('\n');
+}
+function discountInfo(r) {
+  const packs = r.items || [];
+  return {
+    saved: packs.reduce((s, o) => s + (o.discount || 0), 0),
+    lines: packs.flatMap(o => o.discount_lines || []),
+  };
+}
+// 折扣明細一行 → 文字（老闆版一律顯示 ×N；含折抵金額）；舊字串資料相容
+function discLineText(l, forBoss) {
+  if (typeof l === 'string') return l;
+  const q = (forBoss || l.times > 1) ? ' ×' + l.times : '';
+  return l.label + q + '　−$' + l.saved;
+}
+function totalBlock(r) {
+  const d = discountInfo(r);
+  let s = '';
+  if (d.saved > 0) {
+    s += '🎁 優惠折抵 −$' + d.saved + '\n';
+    d.lines.forEach(l => { s += '　' + discLineText(l, true) + '\n'; });
+  }
+  s += '💰 合計 $' + r.total;
+  return s;
+}
+
+/* 口味偏好／備註（純文字版，給預覽用；與 line-push 的 flexPrefRows 同步維護）
+   這裡不能用上面的 formatPrefs——那個有做 HTML 逸出，是給網頁畫面用的，
+   純文字訊息吃到 &amp; 會變成亂碼 */
+function prefTextBlock(r) {
+  const packs = r.items || [];
+  const out = [];
+  packs.forEach(o => {
+    const p = o.prefs;
+    if (!p) return;
+    const who = packs.length > 1 && o.name ? o.name + '：' : '';
+    const t = [];
+    // 蔥蒜胡椒預設加，只標客人選「不要」的
+    if (p.scallion === 'no') t.push('不要蔥');
+    if (p.garlic === 'no') t.push('不要蒜');
+    if (p.pepper === 'no') t.push('不要胡椒');
+    if (p.spicy === 'yes' && p.spiceLevel) t.push('辣度：' + p.spiceLevel);
+    else if (p.spicy === 'side') t.push(p.spiceLevel ? '辣度：' + p.spiceLevel + '（另外裝）' : '辣另外裝');
+    else if (p.spicy === 'no') t.push('不加辣');
+    if (p.utensils === 'yes') t.push('要餐具🥢'); else if (p.utensils === 'no') t.push('不用餐具');
+    if (t.length) out.push('🌿 ' + who + t.join('、'));
+    if (p.note) out.push('📝 ' + who + '備註：' + p.note);
+  });
+  return out.length ? out.join('\n') + '\n' : '';
+}
+
+function buildCustomerMessage(r) {
+  // 開頭不放「🍢 示範滷味」——訊息本來就是官方帳號發的，名字重複（跟 line-push 同步）
+  return '✅ 訂單確認！（取餐編號 #' + r.order_no + '）\n\n'
+    + '食材新鮮現滷，等候時間約 ' + r.wait_minutes + ' 分鐘，\n'
+    + '請於 ' + fmtHM(r.pickup_at) + ' 前往現場取餐。\n\n'
+    + '📋 訂單內容\n' + itemLines(r) + '\n'
+    + prefTextBlock(r)
+    + totalBlock(r);
+}
+
+/* 送出前的最後把關：看到訊息長相才決定要不要放行
+   ↩ 返回＝回時間選擇（保留剛選的分鐘）；知道了＝真正送出生效
+
+   🔕 起【暫時沒有人呼叫這支】——接單改成按下去直接生效。
+   刻意留著不刪：客人推播一旦打開，把 cmSubmit 改回呼叫它就恢復了。 */
+function showLinePreview(r) {
+  const msg = buildCustomerMessage(r);
+  const overlay = document.createElement('div');
+  overlay.className = 'line-preview-overlay';
+  overlay.innerHTML =
+    '<div class="line-preview">'
+    + '<div class="lp-title">📱 客人將收到的訊息（送出前預覽）</div>'
+    + '<div class="lp-chat"><div class="lp-bubble">' + esc(msg).replace(/\n/g, '<br>') + '</div></div>'
+    + '<div class="lp-note">按「知道了」才會生效送出；📱 已綁定 LINE 的客人會自動收到這則訊息，未綁定的客人可在查詢頁看到取餐時間</div>'
+    + '<div class="cm-actions" style="margin-top:14px;">'
+    +   '<button class="btn-plain" style="flex:1;padding:10px;" onclick="this.closest(\'.line-preview-overlay\').remove();openConfirmModal(\'' + r.id + '\',\'' + esc(r.order_no) + '\',' + _cmUpdate + ',true)">↩ 返回</button>'
+    +   '<button class="lp-close" style="flex:1;margin:0;" onclick="this.closest(\'.line-preview-overlay\').remove();commitConfirm(\'' + r.id + '\')">知道了</button>'
+    + '</div>'
+    + '</div>';
+  // 點背景＝取消（不生效，跟按返回一樣安全）
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+/* ---------- ✏️ 訂單編輯器（M0.9-C） ----------
+   客人點錯／打電話來改 → 老闆直接在這裡改量、刪品項、加品項。
+   跟確認接單同一套把關：先看「客人會收到的變更訊息」，按知道了才寫入；
+   寫入後資料庫門鈴自動叫推播員，通知綁定 LINE 的客人（沒綁的不發）。 */
+let _editState = null;   // 編輯中的訂單：{ id, order_no, pickup_at, oldTotal, packs }
+let _edMenuCache = null; // 加品項下拉選單的菜單快取（每次開編輯器重抓，售完的不進來）
+
+async function openEditModal(id) {
+  const { data: r, error } = await db.from('orders').select('*').eq('id', id).single();
+  if (error || !r) { alert('讀取訂單失敗，請重試'); return; }
+  if (r.status !== 'new' && r.status !== 'confirmed') { alert('這張單目前的狀態不能編輯'); return; }
+  _editState = {
+    id: r.id, order_no: r.order_no, pickup_at: r.pickup_at,
+    oldTotal: r.total,
+    packs: JSON.parse(JSON.stringify(r.items || []))  // 深拷貝：按「返回」不會弄髒原單
+  };
+  // 抓可加購的菜單（售完的不列入）
+  const { data: menu } = await db.from('menu_items').select('*').eq('sold_out', false).order('sort');
+  _edMenuCache = menu || [];
+  renderEditModal();
+}
+
+function edPackGross(p) { return (p.items || []).reduce((s, v) => s + v.price * v.qty, 0); }
+function edItemCount()  { return _editState.packs.reduce((s, p) => s + (p.items || []).length, 0); }
+
+/* 🎁 優惠重算（M4）：跟點餐頁同一套「自動湊」規則。
+   規則來自菜單快取（每列帶 bundle_qty/bundle_price）；
+   品項要有 cat（分區代號）才算得了——舊訂單沒 cat 就當無優惠，照品項價計 */
+function edBundleRules() {
+  const rules = {};
+  (_edMenuCache || []).forEach(m => {
+    if (m.bundle_qty && m.bundle_price && !rules[m.category_id]) {
+      rules[m.category_id] = { qty: m.bundle_qty, price: m.bundle_price, unit: m.price };
+    }
+  });
+  return rules;
+}
+function edPackDiscount(p) {
+  const rules = edBundleRules();
+  const cnt = {};
+  (p.items || []).forEach(v => { if (v.cat) cnt[v.cat] = (cnt[v.cat] || 0) + v.qty; });
+  let saved = 0;
+  Object.entries(cnt).forEach(([c, n]) => {
+    const r = rules[c];
+    if (r) saved += Math.floor(n / r.qty) * (r.qty * r.unit - r.price);
+  });
+  return saved;
+}
+function edPackTotal(p)  { return edPackGross(p) - edPackDiscount(p); }
+function edGrandTotal()  { return _editState.packs.reduce((s, p) => s + edPackTotal(p), 0); }
+function edGrandSaved()  { return _editState.packs.reduce((s, p) => s + edPackDiscount(p), 0); }
+/* 折扣明細（對帳版）：跟點餐頁 cartCalc.lines 同一格式 */
+function edPackDiscountLines(p) {
+  const rules = edBundleRules();
+  const cnt = {};
+  (p.items || []).forEach(v => { if (v.cat) cnt[v.cat] = (cnt[v.cat] || 0) + v.qty; });
+  const lines = [];
+  Object.entries(cnt).forEach(([c, n]) => {
+    const r = rules[c];
+    if (!r) return;
+    const times = Math.floor(n / r.qty);
+    if (times < 1) return;
+    const s = times * (r.qty * r.unit - r.price);
+    // 結構化明細：跟點餐頁 cartCalc.lines 同格式（label／times／saved）
+    lines.push({ label: (CAT_LABELS[c] || c) + ' 任' + r.qty + '樣$' + r.price, times: times, saved: s });
+  });
+  return lines;
+}
+
+function renderEditModal() {
+  document.getElementById('editModal')?.remove();
+  const st = _editState;
+
+  let rows = '';
+  st.packs.forEach((p, pi) => {
+    if (st.packs.length > 1 && p.name) rows += '<div class="ed-sub-name">' + esc(p.name) + '</div>';
+    (p.items || []).forEach((v, ii) => {
+      rows += '<div class="ed-row">'
+        + '<span class="ed-name">' + esc(v.name) + ' <span class="ed-price">$' + v.price + '</span></span>'
+        + '<button class="ed-step" onclick="edQty(' + pi + ',' + ii + ',-1)" ' + (v.qty <= 1 ? 'disabled' : '') + '>−</button>'
+        + '<span class="ed-qty">' + v.qty + '</span>'
+        + '<button class="ed-step" onclick="edQty(' + pi + ',' + ii + ',1)">＋</button>'
+        + '<button class="ed-del" onclick="edDel(' + pi + ',' + ii + ')">✕</button>'
+        + '</div>';
+    });
+  });
+
+  // 加品項下拉：依分類分組（只列供應中的）
+  let opts = '';
+  let lastCat = null;
+  _edMenuCache.forEach((m, i) => {
+    if (m.category_id !== lastCat) {
+      if (lastCat !== null) opts += '</optgroup>';
+      opts += '<optgroup label="' + esc(CAT_LABELS[m.category_id] || m.category_id) + '">';
+      lastCat = m.category_id;
+    }
+    opts += '<option value="' + i + '">' + esc(m.name) + '（$' + m.price + '）</option>';
+  });
+  if (lastCat !== null) opts += '</optgroup>';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'line-preview-overlay';
+  overlay.id = 'editModal';
+  overlay.innerHTML =
+    '<div class="line-preview">'
+    + '<div class="lp-title">✏️ 編輯訂單 #' + esc(st.order_no) + '</div>'
+    + '<div class="ed-list">' + rows + '</div>'
+    + '<div class="ed-add-bar">'
+    +   '<select id="edPicker">' + opts + '</select>'
+    +   '<button class="btn-wait" onclick="edAdd()">＋ 加入</button>'
+    + '</div>'
+    + '<div class="ed-total">'
+    +   (edGrandSaved() > 0 ? '<span style="color:var(--dim);font-size:12px;font-weight:400">🎁 已折 $' + edGrandSaved() + '　</span>' : '')
+    +   '合計 $' + edGrandTotal()
+    +   (edGrandTotal() !== st.oldTotal ? ' <span style="color:var(--dim);font-size:12px;font-weight:400">（原 $' + st.oldTotal + '）</span>' : '')
+    + '</div>'
+    + '<div class="cm-actions">'
+    +   '<button class="btn-plain" style="flex:1;padding:11px;" onclick="edClose()">↩ 返回</button>'
+    +   '<button class="btn-accept" style="flex:2;padding:11px;" onclick="edPreview()">預覽變更</button>'
+    + '</div>'
+    + '</div>';
+  overlay.addEventListener('click', e => { if (e.target === overlay) edClose(); });
+  document.body.appendChild(overlay);
+}
+
+function edClose() { document.getElementById('editModal')?.remove(); _editState = null; }
+
+function edQty(pi, ii, delta) {
+  const v = _editState.packs[pi].items[ii];
+  v.qty = Math.max(1, v.qty + delta);  // 最少 1，要拿掉整項請按 ✕
+  renderEditModal();
+}
+
+function edDel(pi, ii) {
+  _editState.packs[pi].items.splice(ii, 1);
+  renderEditModal();
+}
+
+function edAdd() {
+  const sel = document.getElementById('edPicker');
+  const m = _edMenuCache[parseInt(sel.value, 10)];
+  if (!m) return;
+  // 加進第一包；同品項已存在就數量 +1，不重複開行
+  const pack = _editState.packs[0] || (_editState.packs[0] = { items: [] });
+  if (!pack.items) pack.items = [];
+  const exist = pack.items.find(v => v.name === m.name && v.price === m.price);
+  if (exist) exist.qty += 1;
+  else pack.items.push({ name: m.name, qty: 1, price: m.price, cat: m.category_id }); // cat＝優惠重算的鑰匙
+  renderEditModal();
+}
+
+/* 跟推播員（line-push）同一份格式：客人收到的「訂單內容更新」訊息 */
+function buildEditedMessage(r, oldTotal) {
+  const oldNote = (typeof oldTotal === 'number' && oldTotal !== r.total) ? '（原 $' + oldTotal + '）' : '';
+  return '✏️ 訂單內容更新（取餐編號 #' + r.order_no + '）\n\n'
+    + '📋 新內容\n' + itemLines(r) + '\n'
+    + totalBlock(r) + oldNote + '\n'
+    + (r.pickup_at ? '⏰ 取餐時間不變：' + fmtHM(r.pickup_at) + '\n' : '')
+    + '\n如有疑問請致電 0900-000-000';
+}
+
+/* 按「預覽變更」→ 先看客人會收到的訊息（此時什麼都還沒生效）*/
+function edPreview() {
+  const st = _editState;
+  if (edItemCount() === 0) {
+    alert('訂單不能改到空——要整單作廢請用「取消」');
+    return;
+  }
+  const preview = {
+    order_no: st.order_no, pickup_at: st.pickup_at,
+    items: st.packs.map(p => Object.assign({}, p, { discount: edPackDiscount(p), discount_lines: edPackDiscountLines(p) })),
+    total: edGrandTotal()
+  };
+  const msg = buildEditedMessage(preview, st.oldTotal);
+  document.getElementById('editModal')?.remove();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'line-preview-overlay';
+  overlay.id = 'editPreview';
+  overlay.innerHTML =
+    '<div class="line-preview">'
+    + '<div class="lp-title">✏️ 確認修改內容</div>'
+    + '<div class="lp-chat"><div class="lp-bubble">' + esc(msg).replace(/\n/g, '<br>') + '</div></div>'
+    // ：這層保留（改單容易手滑，要看一眼改成什麼樣）
+    // 但說明改掉——客人推播已關，不能再寫「客人會自動收到」
+    + '<div class="lp-note">按「知道了」才會生效。客人不會收到通知，他自己開「訂單查詢」就會看到更新後的內容</div>'
+    + '<div class="cm-actions" style="margin-top:14px;">'
+    +   '<button class="btn-plain" style="flex:1;padding:10px;" onclick="document.getElementById(\'editPreview\').remove();renderEditModal()">↩ 返回</button>'
+    +   '<button class="lp-close" style="flex:1;margin:0;" onclick="document.getElementById(\'editPreview\').remove();commitEdit()">知道了</button>'
+    + '</div>'
+    + '</div>';
+  overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); renderEditModal(); } });
+  document.body.appendChild(overlay);
+}
+
+/* 預覽按「知道了」→ 真正寫入（.select() 驗證真的改到，防 RLS 靜默擋下）*/
+async function commitEdit() {
+  const st = _editState;
+  const packs = st.packs
+    .filter(p => (p.items || []).length > 0)             // 空包不留
+    .map(p => Object.assign({}, p, {
+      total: edPackTotal(p), discount: edPackDiscount(p), discount_lines: edPackDiscountLines(p)
+    }));
+  const total = packs.reduce((s, p) => s + p.total, 0);
+  const { data, error } = await db.from('orders')
+    .update({ items: packs, total }).eq('id', st.id).select();
+  if (error || !data || !data.length) { alert('儲存失敗，請重試'); renderEditModal(); return; }
+  _editState = null;
+  loadOrders();
+}
+
+/* ---------- 🚪 營業設定（打烊系統，） ----------
+   三格設定住在 app_config：公告文字／未來公休日／今日暫停。
+   改了之後客人的點餐頁 10 秒內反應：公告條亮起、公休日整頁打烊擋單。
+   「今日暫停」的聰明設計：存的是今天的日期，明天自動失效——按了不用記得關。 */
+async function openShopSettings() {
+  const { data, error } = await db.from('app_config')
+    .select('name,value').in('name', ['notice', 'closed_dates', 'closed_now', 'pause_now', 'open_hours', 'wait_minutes']);
+  if (error || !data) { alert('讀取失敗——還沒跑 setup-config.sql？'); return; }
+  const cfg = {}; data.forEach(r => cfg[r.name] = r.value || '');
+  const today = taipeiToday();
+  const pausedToday = cfg.closed_now === today;   // 臨時公休（今日公休看板）
+  const pausedNow = cfg.pause_now === today;       // 暫停接單（忙不過來看板）
+  // 營業時段拆成兩個時間框（存檔格式 HH:MM-HH:MM；24:00＝收到半夜，畫面顯示 00:00）
+  const hm = /^(\d{2}:\d{2})-(\d{2}:\d{2})$/.exec(cfg.open_hours || '') || [null, '17:00', '24:00'];
+  const openFrom = hm[1], openTo = (hm[2] === '24:00' ? '00:00' : hm[2]);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'line-preview-overlay';
+  overlay.id = 'shopSettings';
+  overlay.innerHTML =
+    '<div class="menu-mgr">'
+    + '<div class="lp-title">🚪 營業設定</div>'
+    + '<div class="mm-list">'
+    +   '<div class="dr-sec">⏸ 臨時打烊</div>'
+    +   '<button id="pauseBtn" class="' + (pausedToday ? 'btn-accept' : 'btn-cancel') + '" style="width:100%;padding:12px;font-size:15px;" onclick="togglePauseToday(' + pausedToday + ')">'
+    +     (pausedToday ? '▶️ 恢復營業（目前：今日公休中）' : '🚪 臨時公休（今天不開）')
+    +   '</button>'
+    +   '<div class="lp-note" style="text-align:left">客人看到「今日公休・感謝支持明天見」且無法下單；明天自動恢復，不用記得回來關</div>'
+    +   '<button id="pauseNowBtn" class="' + (pausedNow ? 'btn-accept' : 'btn-cancel') + '" style="width:100%;padding:12px;font-size:15px;margin-top:10px;" onclick="togglePauseNow(' + pausedNow + ')">'
+    +     (pausedNow ? '▶️ 恢復接單（目前：暫停接單中）' : '⏸️ 暫停接單（忙不過來）')
+    +   '</button>'
+    +   '<div class="lp-note" style="text-align:left">客人看到「暫停接單・老闆忙不過來啦！」且無法下單；明天自動恢復</div>'
+    +   '<div class="dr-sec">🕔 每日接單時段</div>'
+    +   '<div style="display:flex;gap:8px;align-items:center;">'
+    +     '<input type="time" id="cfgOpenFrom" value="' + openFrom + '" style="flex:1;padding:9px;border-radius:6px;border:1px solid var(--line);background:#141210;color:var(--text);color-scheme:dark;">'
+    +     '<span style="color:var(--dim)">–</span>'
+    +     '<input type="time" id="cfgOpenTo" value="' + openTo + '" style="flex:1;padding:9px;border-radius:6px;border:1px solid var(--line);background:#141210;color:var(--text);color-scheme:dark;">'
+    +   '</div>'
+    +   '<div class="lp-note" style="text-align:left">時段外客人頁顯示「尚未營業」並擋單；結束時間選 00:00＝收單到半夜</div>'
+    +   '<div class="dr-sec">⏱ 目前等待時間（分鐘）</div>'
+    +   '<div class="cm-presets" id="cfgWaitPresets" style="flex-wrap:wrap;gap:6px;">'
+    +     [15, 20, 25, 30, 35, 40].map(m =>
+            '<button class="btn-wait cm-preset" data-m="' + m + '" style="min-width:52px;flex:none;padding:9px 0 ;" onclick="cfgWaitSet(' + m + ')">' + m + '</button>').join('')
+    +   '</div>'
+    +   '<div class="cm-stepper" style="margin-top:8px;">'
+    +     '<button class="cm-step" onclick="cfgWaitStep(-5)">−</button>'
+    +     '<input type="number" id="cfgWait" min="1" max="180" step="5" value="' + esc(cfg.wait_minutes || '15') + '" oninput="cfgWaitHighlight()" style="width:76px;padding:8px;text-align:center;font-size:20px;font-weight:900;border-radius:6px;border:1px solid var(--line);background:#141210;color:var(--gold2);">'
+    +     '<span style="color:var(--dim);font-size:13px;">分鐘</span>'
+    +     '<button class="cm-step" onclick="cfgWaitStep(5)">＋</button>'
+    +   '</div>'
+    +   '<div class="lp-note" style="text-align:left">顯示在客人首頁「目前等待時間：約 X 分鐘」；快選、±5、或直接打數字都行，按儲存生效</div>'
+    +   '<div class="dr-sec">📅 未來公休日</div>'
+    +   '<div style="display:flex;gap:8px;">'
+    +     '<input type="date" id="cfgDatePick" min="' + today + '" value="' + today + '" style="flex:1;padding:9px;border-radius:6px;border:1px solid var(--line);background:#141210;color:var(--text);color-scheme:dark;">'
+    +     '<button class="btn-wait" onclick="addCfgDate()">➕ 加入</button>'
+    +   '</div>'
+    +   '<div id="cfgDateChips" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;"></div>'
+    +   '<div class="lp-note" style="text-align:left">用日曆選日期按「加入」；到了那天自動打烊、隔天自動恢復；點日期籤上的 ✕ 移除</div>'
+    +   '<div class="dr-sec">📢 公告文字</div>'
+    +   '<textarea id="cfgNotice" rows="3" style="width:100%;padding:10px;border-radius:6px;border:1px solid var(--line);background:#141210;color:var(--text);font-size:14px;">' + esc(cfg.notice) + '</textarea>'
+    +   '<div class="lp-note" style="text-align:left">顯示在客人點餐頁最上方（例：7/21(二)、7/28(二) 公休）；留空＝不顯示</div>'
+    +   '<div class="dr-sec">🚨 應急模式（LINE 掛掉時才用）</div>'
+    +   '<div id="emgBox" class="lp-note" style="text-align:left">讀取中…</div>'
+    + '</div>'
+    + '<div class="dr-actions">'
+    +   '<button class="btn-plain" style="flex:1;padding:10px;" onclick="document.getElementById(\'shopSettings\').remove()">關 閉</button>'
+    +   '<button class="btn-accept" style="flex:2;padding:10px;" onclick="saveShopSettings()">💾 儲存公休日與公告</button>'
+    + '</div>'
+    + '</div>';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+  // 公休日改「用選的」：既有日期還原成日期籤（過期的自動剔除）
+  _cfgDates = (cfg.closed_dates || '').split(/[,，\s]+/).filter(d => d && d >= today);
+  renderCfgDateChips();
+  cfgWaitHighlight(); // 等待時間快選鈕標示目前值
+  renderEmergencyBox();
+}
+
+/* ============================================================
+   🚨 應急模式
+
+   平常客人只能從 LINE 進來點餐——每張單都對得到一個真人，這是優點。
+   但 LINE 平台一掛，線上訂餐就整個歸零。
+   這個模式讓客人用「帶通行碼的網址」直接下單，不需要 LINE。
+
+   為什麼不另外做一個網站：兩份程式碼遲早不同步
+   （素肚單位、紙本錯價都是這個坑咬出來的）。同一個網站 ＋ 一個開關就好。
+
+   通行碼存在保險櫃（前端讀不到），所以這裡透過三支受控函式操作：
+   emergency_status / set_emergency / rotate_emergency_code
+   ============================================================ */
+async function renderEmergencyBox() {
+  const box = document.getElementById('emgBox');
+  if (!box) return;
+  const { data, error } = await db.rpc('emergency_status');
+  if (error || !data || !data.length) {
+    box.innerHTML = '⚠️ 讀取失敗——還沒跑 setup-emergency.sql？';
+    return;
+  }
+  const st = data[0];
+  const on = st['是否啟用'];
+  const url = st['網址'];
+  box.innerHTML =
+    '<button class="' + (on ? 'btn-accept' : 'btn-cancel') + '" style="width:100%;padding:12px;font-size:15px;" '
+    + 'onclick="toggleEmergency(' + (on ? 'false' : 'true') + ')">'
+    +   (on ? '🟢 關閉應急模式（目前：啟用中）' : '🚨 啟動應急模式')
+    + '</button>'
+    + (on
+      ? '<div style="margin-top:10px;background:#241f18;border:1px solid var(--line);border-radius:8px;padding:10px;">'
+        + '<div style="font-size:12px;color:var(--dim);margin-bottom:6px;">把這個網址給客人（用 LINE、簡訊、寫在店門口都行）</div>'
+        + '<div style="font-size:13px;word-break:break-all;color:var(--gold2);font-weight:900;">' + esc(url) + '</div>'
+        + '<div style="display:flex;gap:8px;margin-top:10px;">'
+        +   '<button class="btn-wait" style="flex:1;padding:9px;" onclick="copyEmergencyUrl(\'' + esc(url) + '\')">📋 複製網址</button>'
+        +   '<button class="btn-cancel" style="flex:1;padding:9px;" onclick="rotateEmergency()">🔄 換新碼</button>'
+        + '</div>'
+        + '<div style="font-size:12px;color:var(--dim);margin-top:8px;line-height:1.7;">'
+        +   '・換新碼＝舊網址立刻失效（傳出去被亂轉發時用）<br>'
+        +   '・這條路徑<b>不會</b>傳訂單訊息到 LINE 聊天室 → 訂單會標 ⚡ 應急單<br>'
+        +   '・客人靠「取餐編號 ＋ 姓名電話」自己查進度'
+        + '</div>'
+        + '</div>'
+      : '<div class="lp-note" style="text-align:left">平常關著。開了之後客人可以用專屬網址直接下單，'
+        + '不需要 LINE。<b>LINE 恢復正常就記得關掉</b>，回到「每張單都找得到人」的狀態。</div>');
+}
+
+async function toggleEmergency(on) {
+  if (on && !confirm('要啟動應急模式嗎？\n\n啟動後，拿到專屬網址的人不需要 LINE 就能下單。\nLINE 恢復正常記得回來關掉。')) return;
+  const { error } = await db.rpc('set_emergency', { on_off: on });
+  if (error) { alert('切換失敗：' + error.message); return; }
+  renderEmergencyBox();
+}
+
+async function rotateEmergency() {
+  if (!confirm('要換一組新的通行碼嗎？\n\n舊網址會【立刻失效】，已經拿到舊網址的客人要重新給他新的。')) return;
+  const { error } = await db.rpc('rotate_emergency_code');
+  if (error) { alert('換碼失敗：' + error.message); return; }
+  renderEmergencyBox();
+  alert('✅ 已換新碼，舊網址已失效');
+}
+
+async function copyEmergencyUrl(url) {
+  try {
+    await navigator.clipboard.writeText(url);
+    alert('✅ 網址已複製，貼給客人就好 📋');
+  } catch (e) {
+    prompt('請複製下面的網址給客人：', url);
+  }
+}
+
+/* 📅 公休日期籤：用日曆選，顯示短格式（例如 7/19），儲存格式仍是完整日期 */
+let _cfgDates = [];
+function fmtMD(d) { const p = d.split('-'); return parseInt(p[1], 10) + '/' + parseInt(p[2], 10); }
+function renderCfgDateChips() {
+  const box = document.getElementById('cfgDateChips');
+  if (!box) return;
+  _cfgDates.sort();
+  box.innerHTML = _cfgDates.length
+    ? _cfgDates.map((d, i) =>
+        '<span style="display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border:1px solid var(--gold);border-radius:14px;color:var(--gold2);font-size:13px;">'
+        + fmtMD(d)
+        + '<button onclick="rmCfgDate(' + i + ')" style="border:none;background:none;color:var(--red);cursor:pointer;font-size:13px;">✕</button></span>'
+      ).join('')
+    : '<span style="color:var(--dim);font-size:12px;">（尚未排定公休日）</span>';
+}
+function addCfgDate() {
+  const v = document.getElementById('cfgDatePick')?.value;
+  if (!v) return;
+  if (!_cfgDates.includes(v)) _cfgDates.push(v);
+  renderCfgDateChips();
+}
+function rmCfgDate(i) { _cfgDates.splice(i, 1); renderCfgDateChips(); }
+
+/* ⏱ 等待時間的三種輸入（快選/±5/手打）都匯進同一個數字框 */
+function cfgWaitSet(m) {
+  const el = document.getElementById('cfgWait');
+  if (el) el.value = m;
+  cfgWaitHighlight();
+}
+function cfgWaitStep(d) {
+  const el = document.getElementById('cfgWait');
+  if (!el) return;
+  el.value = Math.min(180, Math.max(5, (parseInt(el.value, 10) || 15) + d));
+  cfgWaitHighlight();
+}
+function cfgWaitHighlight() {
+  const v = parseInt(document.getElementById('cfgWait')?.value, 10);
+  document.querySelectorAll('#cfgWaitPresets .cm-preset').forEach(b =>
+    b.classList.toggle('active', parseInt(b.dataset.m, 10) === v));
+}
+
+/* 今日暫停開關：立即生效（不用按儲存） */
+async function togglePauseToday(currentlyPaused) {
+  const val = currentlyPaused ? '' : taipeiToday();
+  const { data, error } = await db.from('app_config')
+    .update({ value: val }).eq('name', 'closed_now').select();
+  if (error || !data?.length) { alert('切換失敗，請確認已登入再試'); return; }
+  document.getElementById('shopSettings')?.remove();
+  openShopSettings(); // 重開＝看到最新狀態
+}
+
+/* 暫停接單開關：立即生效（值＝今天日期，隔天自動失效）；需先跑 setup-security.sql 建 pause_now 格 */
+async function togglePauseNow(currentlyPaused) {
+  const val = currentlyPaused ? '' : taipeiToday();
+  const { data, error } = await db.from('app_config')
+    .update({ value: val }).eq('name', 'pause_now').select();
+  if (error || !data?.length) { alert('切換失敗——請確認已登入，且已跑過 setup-security.sql（新增 pause_now 格）'); return; }
+  document.getElementById('shopSettings')?.remove();
+  openShopSettings();
+}
+
+async function saveShopSettings() {
+  const dates = _cfgDates.join(',');  // 日期籤選好的（存完整格式，顯示才用 7/19）
+  const notice = (document.getElementById('cfgNotice')?.value || '').trim();
+  const from = document.getElementById('cfgOpenFrom')?.value || '17:00';
+  const toRaw = document.getElementById('cfgOpenTo')?.value || '00:00';
+  const hours = from + '-' + (toRaw === '00:00' ? '24:00' : toRaw); // 00:00 存成 24:00＝收到半夜
+  const wait = Math.min(180, Math.max(1, parseInt(document.getElementById('cfgWait')?.value, 10) || 15));
+  const r1 = await db.from('app_config').update({ value: dates }).eq('name', 'closed_dates').select();
+  const r2 = await db.from('app_config').update({ value: notice }).eq('name', 'notice').select();
+  const r3 = await db.from('app_config').update({ value: hours }).eq('name', 'open_hours').select();
+  const r4 = await db.from('app_config').update({ value: String(wait) }).eq('name', 'wait_minutes').select();
+  if (r1.error || r2.error || r3.error || r4.error
+      || !r1.data?.length || !r2.data?.length || !r3.data?.length || !r4.data?.length) {
+    alert('儲存失敗——若是新欄位存不進去，先重跑一次 setup-config.sql（最新版含 wait_minutes）再試');
+    return;
+  }
+  alert('✅ 已儲存！客人頁 10 秒內生效');
+  document.getElementById('shopSettings')?.remove();
+}
+
+/* ---------- 📊 老闆日報（M0.9-A） ----------
+   收店後看一眼今天的成績單：熱賣排行＋訂單總整理＋營收合計。
+   取消的訂單不計入營收與排行（只列在清單裡供對帳）。
+   📤 分享＝手機一鍵傳 LINE；⬇️ CSV＝回家用電腦開 Excel。 */
+let _drDate = null;      // 目前看的日期（台北時間 YYYY-MM-DD）
+let _drShare = '';       // 分享用的純文字版
+let _drCsv = '';         // 下載用的 CSV 內容
+
+function taipeiToday() {
+  // sv-SE 這個地區格式剛好就是 YYYY-MM-DD，拿來當日期字串最省事
+  return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+}
+function drWeekday(dateStr) {
+  return new Date(dateStr + 'T00:00:00+08:00')
+    .toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei', weekday: 'narrow' });
+}
+function drShift(days) {
+  const d = new Date(_drDate + 'T12:00:00+08:00'); // 取中午避開換日邊界
+  d.setDate(d.getDate() + days);
+  const next = d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+  if (next > taipeiToday()) return; // 未來還沒有日報
+  openDailyReport(next);
+}
+
+/* 把一行品項攤進排行統計；任選組合拆開算進各品項（例：任選3個（貢丸×2、花枝丸））
+   ※ 任選組合未來會從菜單移除，這段拆解到時自然閒置，不影響其他品項 */
+function drExplode(v, tally) {
+  const m = /^任選3個（(.+)）$/.exec(v.name);
+  if (m) {
+    m[1].split('、').forEach(tok => {
+      const mm = /^(.+?)×(\d+)$/.exec(tok);
+      const nm = mm ? mm[1] : tok;
+      const n = (mm ? parseInt(mm[2], 10) : 1) * v.qty;
+      tally[nm] = (tally[nm] || 0) + n;
+    });
+  } else {
+    tally[v.name] = (tally[v.name] || 0) + v.qty;
+  }
+}
+
+async function openDailyReport(dateStr) {
+  _drDate = dateStr || taipeiToday();
+  // 台北時間的一整天 = [當日 00:00+08:00, 隔日 00:00+08:00)
+  const start = new Date(_drDate + 'T00:00:00+08:00');
+  const end = new Date(start.getTime() + 86400000);
+  const { data, error } = await db.from('orders').select('*')
+    .gte('created_at', start.toISOString()).lt('created_at', end.toISOString())
+    .order('created_at', { ascending: true });
+  if (error) { alert('日報讀取失敗，請重試'); return; }
+  renderDailyReport(data || []);
+}
+
+function renderDailyReport(rows) {
+  const cancelled = rows.filter(r => r.status === 'cancelled');
+
+  // 🚫 棄單要從營業額裡分出來（原則：不收訂金，但棄單絕不算營業額，那是成本損失）
+  //    做好了沒人領 ＝ 材料、瓦斯、工都花掉了，卻一毛錢都沒進來。
+  //    混在營收裡看不見，這家店就永遠不知道自己被棄單吃掉多少。
+  const noShow = rows.filter(r => r.no_show);
+  const valid = rows.filter(r => r.status !== 'cancelled' && !r.no_show);
+  const revenue = valid.reduce((s, r) => s + (r.total || 0), 0);
+  const lost = noShow.reduce((s, r) => s + (r.total || 0), 0);
+
+  // 熱賣排行（只算沒取消的單）
+  const tally = {};
+  valid.forEach(r => (r.items || []).forEach(o => (o.items || []).forEach(v => drExplode(v, tally))));
+  const rank = Object.entries(tally).sort((a, b) => b[1] - a[1]);
+  const medal = i => (i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : (i + 1) + '.');
+
+  const statusLabel = { new: '新單', confirmed: '製作中', done: '完成', cancelled: '已取消' };
+  const stLabel = r => r.no_show ? '棄單' : (statusLabel[r.status] || r.status);
+  const title = _drDate + '（' + drWeekday(_drDate) + '）';
+
+  // ── 畫面 ──
+  const rankHtml = rank.length
+    ? rank.map(([nm, n], i) =>
+        '<div class="dr-rank-row"><span>' + medal(i) + ' ' + esc(nm) + '</span><b style="color:var(--gold2)">×' + n + '</b></div>'
+      ).join('')
+    : '<div class="empty" style="padding:14px 0">今天還沒有訂單 🍃</div>';
+
+  const listHtml = rows.map(r => {
+    const t = new Date(r.created_at).toLocaleTimeString('zh-TW', { timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit', hour12: false });
+    const items = (r.items || []).flatMap(o => (o.items || []).map(v => v.name + '×' + v.qty)).join('、');
+    return '<div class="dr-order-row' + (r.status === 'cancelled' || r.no_show ? ' cancelled' : '') + '">'
+      + '<b>#' + esc(r.order_no) + '</b>　' + t + '　' + esc(r.customer_name) + '　$' + r.total
+      + '　[' + stLabel(r) + ']<br>' + esc(items) + '</div>';
+  }).join('');
+
+  // ── 分享文字版（手機傳 LINE 用）──
+  _drShare = '🍢 示範滷味日報 ' + title + '\n'
+    + '訂單 ' + rows.length + ' 張（有效 ' + valid.length + '・取消 ' + cancelled.length
+    + (noShow.length ? '・棄單 ' + noShow.length : '') + '）\n'
+    + '營收 $' + revenue + '\n'
+    + (lost ? '棄單損失 -$' + lost + '\n' : '')
+    + '\n'
+    + (rank.length ? rank.slice(0, 3).map(([nm, n], i) => medal(i) + ' ' + nm + ' ×' + n).join('\n') : '（本日無訂單）');
+
+  // ── CSV（開頭加 BOM 記號 ﻿＝讓 Excel 認得中文；用明碼寫避免隱形字元造成亂碼）──
+  const q = s => '"' + String(s).replace(/"/g, '""') + '"';
+  _drCsv = '﻿' + '示範滷味日報,' + _drDate + '\n'
+    + '訂單數,' + rows.length + '\n有效單,' + valid.length + '\n取消單,' + cancelled.length
+    + '\n棄單數,' + noShow.length + '\n營收,' + revenue + '\n棄單損失,' + lost + '\n\n'
+    + '排行,品項,份數\n'
+    + rank.map(([nm, n], i) => (i + 1) + ',' + q(nm) + ',' + n).join('\n')
+    + '\n\n編號,時間,客人,金額,狀態,品項\n'
+    + rows.map(r => {
+        const t = new Date(r.created_at).toLocaleTimeString('zh-TW', { timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit', hour12: false });
+        const items = (r.items || []).flatMap(o => (o.items || []).map(v => v.name + '×' + v.qty)).join('、');
+        return q(r.order_no) + ',' + t + ',' + q(r.customer_name) + ',' + r.total + ',' + stLabel(r) + ',' + q(items);
+      }).join('\n');
+
+  // ── 彈窗 ──
+  document.getElementById('dailyReport')?.remove();
+  const overlay = document.createElement('div');
+  overlay.className = 'line-preview-overlay';
+  overlay.id = 'dailyReport';
+  overlay.innerHTML =
+    '<div class="menu-mgr">'
+    + '<div class="lp-title">📊 老闆日報</div>'
+    + '<div class="dr-nav">'
+    +   '<button class="btn-plain" onclick="drShift(-1)">‹ 前一天</button>'
+    +   '<span class="dr-date">' + title + '</span>'
+    +   '<button class="btn-plain" onclick="drShift(1)" ' + (_drDate >= taipeiToday() ? 'disabled style="opacity:0.3"' : '') + '>後一天 ›</button>'
+    + '</div>'
+    + '<div class="dr-stats">'
+    +   '<div class="dr-stat"><b>' + valid.length + '</b><span>有效單</span></div>'
+    +   '<div class="dr-stat"><b>' + cancelled.length + '</b><span>取消</span></div>'
+    +   '<div class="dr-stat"><b>$' + revenue + '</b><span>營收</span></div>'
+    + '</div>'
+    // 有棄單才顯示這一列——沒有的日子不要放一個「$0 損失」在那邊礙眼
+    + (noShow.length
+        ? '<div class="dr-stats" style="margin-top:-6px;">'
+          + '<div class="dr-stat"><b style="color:#ff8f6b">' + noShow.length + '</b><span>棄單</span></div>'
+          + '<div class="dr-stat"><b style="color:#ff8f6b">-$' + lost + '</b><span>棄單損失</span></div>'
+          + '</div>'
+        : '')
+    + '<div class="mm-list">'
+    +   '<div class="dr-sec">🏆 熱賣排行</div>' + rankHtml
+    +   '<div class="dr-sec">📋 訂單清單</div>' + (listHtml || '<div class="empty" style="padding:14px 0">無</div>')
+    + '</div>'
+    + '<div class="dr-actions">'
+    +   '<button class="btn-wait" style="flex:1;padding:10px;" onclick="drShareReport()">📤 分享</button>'
+    +   '<button class="btn-wait" style="flex:1;padding:10px;" onclick="drDownloadCsv()">⬇️ CSV</button>'
+    +   '<button class="lp-close" style="flex:1;margin:0;" onclick="document.getElementById(\'dailyReport\').remove()">關 閉</button>'
+    + '</div>'
+    + '</div>';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+/* 📤 手機：跳出系統分享面板（可直接傳 LINE）；電腦或不支援時退回複製 */
+async function drShareReport() {
+  if (navigator.share) {
+    try { await navigator.share({ text: _drShare }); return; } catch (e) { /* 使用者取消就算了 */ }
+  } else if (navigator.clipboard) {
+    await navigator.clipboard.writeText(_drShare);
+    alert('日報文字已複製，貼到 LINE 就能傳 📋');
+  }
+}
+
+/* ⬇️ 下載 CSV（Excel 直接開；檔名帶日期）*/
+function drDownloadCsv() {
+  const blob = new Blob([_drCsv], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '示範滷味日報_' + _drDate + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
+}
+
+/* ---------- 🍢 菜單管理（M0.9-B：售完/恢復） ----------
+   菜單住在雲端 menu_items 資料表（跟點餐頁同一份＝單一真相來源）。
+   老闆在這裡按「售完」→ 客人的點餐頁 10 秒內自動變灰不可點；補貨按「恢復」。
+   RLS 門禁：只有登入的老闆改得動；沒登入的人連按都按不出效果。 */
+const CAT_LABELS = {
+  // v2（老闆親傳菜單）
+  b15: '15元區', wan: '鍋物（丸類）', jiao: '鍋物（餃類）', b20: '20元區', b25: '25元區', b30: '30元區',
+  solo: '單品', meat: '肉類', veg: '蔬食青菜', noodle: '麵類', extra: '餐具',
+  // 舊版代號（歷史訂單對照用）
+  p10: '$10 元', p15: '$15 元', p20: '$20 元', p25: '$25 元', combo25: '任選3個 $25',
+  p30: '$30 元', p35: '$35 元', combo35: '任選3個 $35', p45: '$45 元'
+};
+
+async function openMenuManager() {
+  const { data, error } = await db.from('menu_items').select('*').order('sort');
+  if (error || !data || !data.length) {
+    alert('菜單讀取失敗——是不是還沒在 Supabase SQL Editor 執行 setup-menu.sql？');
+    return;
+  }
+  // 依分類分組，照 sort 順序畫出來
+  const groups = {};
+  data.forEach(r => { (groups[r.category_id] = groups[r.category_id] || []).push(r); });
+  let listHtml = '';
+  Object.keys(groups).forEach(cid => {
+    listHtml += '<div class="mm-cat">' + (CAT_LABELS[cid] || cid) + '</div>'
+      + groups[cid].map(mmRowHTML).join('');
+  });
+
+  const overlay = document.createElement('div');
+  overlay.className = 'line-preview-overlay';
+  overlay.id = 'menuMgr';
+  overlay.innerHTML =
+    '<div class="menu-mgr">'
+    + '<div class="lp-title">🍢 菜單管理</div>'
+    + '<div class="lp-note" style="margin-top:0">按右邊按鈕切換：售完 → 客人點餐頁變灰不可點；補貨後按一下恢復</div>'
+    + '<div class="mm-list">' + listHtml + '</div>'
+    + '<button class="lp-close" onclick="document.getElementById(\'menuMgr\').remove()">關 閉</button>'
+    + '</div>';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+/* 一列＝一個品項：名字＋價格＋狀態鈕（綠＝供應中／紅＝已售完，按了就切換） */
+function mmRowHTML(r) {
+  return '<div class="mm-row' + (r.sold_out ? ' off' : '') + '" id="mmrow-' + r.id + '">'
+    + '<span class="mm-name">' + esc(r.name) + '<span class="mm-price">$' + r.price + '</span></span>'
+    + '<button class="mm-btn' + (r.sold_out ? ' off' : '') + '" onclick="toggleSoldOut(' + r.id + ',' + !r.sold_out + ',this)">'
+    + (r.sold_out ? '❌ 已售完' : '✅ 供應中') + '</button>'
+    + '</div>';
+}
+
+async function toggleSoldOut(id, to, btn) {
+  btn.disabled = true;
+  // .select() 是驗收憑證：RLS 若擋下（例如沒登入），更新會「安靜地改到 0 筆」，
+  // 要求回傳改到的資料列，才能分辨「真的改成功」和「被門禁擋掉」
+  const { data, error } = await db.from('menu_items')
+    .update({ sold_out: to }).eq('id', id).select();
+  btn.disabled = false;
+  if (error || !data || !data.length) {
+    alert('更新失敗：請確認已用老闆帳號登入，再試一次');
+    return;
+  }
+  const row = document.getElementById('mmrow-' + id);
+  row.classList.toggle('off', to);
+  btn.classList.toggle('off', to);
+  btn.textContent = to ? '❌ 已售完' : '✅ 供應中';
+  btn.setAttribute('onclick', 'toggleSoldOut(' + id + ',' + !to + ',this)');
+}
+
+/* 防範惡意輸入：把客人填的文字裡的特殊符號變無害（資安基本功）*/
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>
