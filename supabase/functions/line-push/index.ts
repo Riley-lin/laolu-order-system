@@ -1,0 +1,350 @@
+// ============================================================
+// 示範滷味 LINE 推播員
+// 職責：資料庫一有動靜（新訂單／老闆確認接單），觸發器會叫醒它，
+//       它負責把訊息真正發進 LINE。
+//
+//   kind = 'new_order'  → 通知所有管理員（老闆）：有新單！
+//   kind = 'confirmed'  → 通知該訂單綁定的客人：取餐時間出爐
+//   kind = 'edited'     → 通知該訂單綁定的客人：訂單內容被老闆修改
+//
+// 客人通知已升級成 Flex 卡片（金額靠右對帳版），跟老闆卡片同一套排版元件。
+//
+// 安全機制：只認得帶正確通行碼（x-webhook-secret）的呼叫，
+// 路人拿到網址也叫不動它。
+// ============================================================
+
+import { createClient } from 'jsr:@supabase/supabase-js@2'
+
+const ACCESS_TOKEN = Deno.env.get('LINE_CHANNEL_ACCESS_TOKEN')!
+const WEBHOOK_SECRET = Deno.env.get('WEBHOOK_SECRET')!
+
+const db = createClient(
+  Deno.env.get('SUPABASE_URL')!,
+  Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+)
+
+// ---------- 發 LINE 推播 ----------
+async function push(to: string, text: string, meta?: { orderNo?: string, kind?: string }) {
+  await pushMessages(to, [{ type: 'text', text }], meta)
+}
+
+// 進階版：可以發任何形式的訊息（文字、按鈕卡片…）
+/* 每一次推播都寫進 push_log。
+   為什麼要做：通知若沒送達，需要能夠直接查表排查原因，而不是只能臆測。
+   ⚠️ userId 只留前 8 碼——足夠辨識是誰，又不會把完整身分存成一份新的個資。 */
+async function logPush(orderNo: string, kind: string, to: string,
+                       ok: boolean, statusCode: number | null, error: string | null) {
+  try {
+    await db.from('push_log').insert({
+      order_no: orderNo || null,
+      kind,
+      target: to ? to.slice(0, 8) + '…' : null,
+      ok,
+      status_code: statusCode,
+      error: error ? String(error).slice(0, 300) : null,
+    })
+  } catch (e) { console.error('push_log 寫入失敗（不影響推播）：', e) }
+}
+
+async function pushMessages(to: string, messages: unknown[], meta?: { orderNo?: string, kind?: string }) {
+  const kind = meta?.kind || 'push'
+  const orderNo = meta?.orderNo || ''
+  try {
+    const res = await fetch('https://api.line.me/v2/bot/message/push', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${ACCESS_TOKEN}`,
+      },
+      body: JSON.stringify({ to, messages }),
+    })
+    if (!res.ok) {
+      const body = await res.text()
+      console.error('LINE push 失敗：', res.status, body)
+      await logPush(orderNo, kind, to, false, res.status, body)
+      return false
+    }
+    await logPush(orderNo, kind, to, true, res.status, null)
+    return true
+  } catch (e) {
+    // 網路層直接失敗（連 LINE 都沒連上）
+    console.error('LINE push 連線失敗：', e)
+    await logPush(orderNo, kind, to, false, null, String(e))
+    return false
+  }
+}
+
+// ---------- 台北時間 HH:MM ----------
+function fmtHM(iso: string): string {
+  return new Date(iso).toLocaleTimeString('zh-TW',
+    { timeZone: 'Asia/Taipei', hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+// ---------- 台北日期 M/D（棄單通知要講「哪一天那張單」）----------
+function fmtDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('zh-TW',
+    { timeZone: 'Asia/Taipei', month: 'numeric', day: 'numeric' })
+}
+
+// ---------- 品項條列（對帳版）：一行一項＋每行金額 ----------
+function flatItems(r: any): any[] {
+  return (r.items ?? []).flatMap((o: any) => (o.items ?? []))
+}
+// 折扣總額＋分區明細（下單當下由點餐頁算好存進訂單＝單一真相來源；舊單沒有就略過）
+function discountInfo(r: any): { saved: number; lines: string[] } {
+  const packs = r.items ?? []
+  const saved = packs.reduce((s: number, o: any) => s + (o.discount || 0), 0)
+  const lines = packs.flatMap((o: any) => o.discount_lines ?? [])
+  return { saved, lines }
+}
+
+// ---------- 口味偏好 → 中文一行（不含備註）----------
+// 規則跟 boss.html 的 formatPrefs、點餐頁的 prefLines 完全一致，三邊同步維護
+// 備註刻意不放進來：它要獨立一行印，才不會被一長串「不要蔥、加蒜…」蓋過去
+function formatPrefs(p: any): string {
+  if (!p) return ''
+  const out: string[] = []
+  // 蔥蒜胡椒預設加，只標客人選「不要」的（加是標配不印，三邊同步：點餐頁/boss.html/此處）
+  if (p.scallion === 'no') out.push('不要蔥')
+  if (p.garlic === 'no') out.push('不要蒜')
+  if (p.pepper === 'no') out.push('不要胡椒')
+  if (p.spicy === 'yes' && p.spiceLevel) out.push('辣度：' + p.spiceLevel)
+  else if (p.spicy === 'side') out.push(p.spiceLevel ? '辣度：' + p.spiceLevel + '（另外裝）' : '辣另外裝')
+  else if (p.spicy === 'no') out.push('不加辣')
+  if (p.utensils === 'yes') out.push('要餐具🥢'); else if (p.utensils === 'no') out.push('不用餐具')
+  return out.join('、')
+}
+
+// ---------- 偏好＋備註的 Flex 列（補：以前 LINE 卡片根本沒印這段）----------
+// 訂單可能有多包（分開結帳＝一人一包），所以逐包印；多包時前面加人名才分得清誰要不要蔥
+function flexPrefRows(r: any): any[] {
+  const packs = r.items ?? []
+  const rows: any[] = []
+  packs.forEach((o: any) => {
+    const who = packs.length > 1 && o.name ? o.name + '：' : ''
+    const taste = formatPrefs(o.prefs)
+    if (taste) {
+      rows.push({ type: 'text', text: '🌿 ' + who + taste, size: 'sm', wrap: true, color: '#2E7D32', margin: 'sm' })
+    }
+    // 備註獨立一行、加粗——這是客人自己打的字，漏看代價最大
+    // 改深藍：原本的紅棕 #C0392B 跟「🎁 優惠折抵」同色，兩行擠在一起會看成同一類
+    // 卡片配色分工：金＝金額、綠＝口味偏好、紅棕＝折扣、深藍＝客人交代的字
+    if (o.prefs?.note) {
+      rows.push({ type: 'text', text: '📝 ' + who + '備註：' + o.prefs.note, size: 'sm', weight: 'bold', wrap: true, color: '#1A5FB4', margin: 'sm' })
+    }
+  })
+  return rows
+}
+
+// ---------- 對帳版 Flex 列（品名靠左、金額靠右＋折扣明細＋合計）----------
+// 老闆卡片與客人卡片共用同一套——兩邊看到的帳永遠同款
+// （純文字在 LINE 沒辦法真靠右——字寬不固定；要對齊只能用卡片，所以升級成卡片排版）
+// forBoss＝true：老闆卡片保留 ×N；客人卡片(false)＝×1 省略、只在 ≥2 才顯示
+function flexItemRows(r: any, forBoss = false): any[] {
+  const d = discountInfo(r)
+  const rows: any[] = flatItems(r).map((v: any) => ({
+    type: 'box', layout: 'horizontal', contents: [
+      { type: 'text', text: '・' + v.name + ' ×' + v.qty, size: 'sm', weight: 'bold', wrap: true, flex: 5 },
+      { type: 'text', text: '$' + (v.price * v.qty), size: 'sm', align: 'end', flex: 2, color: '#B8860B' },
+    ],
+  }))
+  if (d.saved > 0) {
+    rows.push({
+      type: 'box', layout: 'horizontal', margin: 'sm', contents: [
+        { type: 'text', text: '🎁 優惠折抵', size: 'sm', weight: 'bold', color: '#C0392B', flex: 5 },
+        { type: 'text', text: '−$' + d.saved, size: 'sm', align: 'end', flex: 2, color: '#C0392B' },
+      ],
+    })
+    // 折扣明細：名稱靠左、金額靠右對齊（舊字串資料相容）
+    d.lines.forEach((l: any) => {
+      const isStr = typeof l === 'string'
+      const label = isStr ? l : (l.label + ((forBoss || l.times > 1) ? ' ×' + l.times : ''))
+      const contents: any[] = [{ type: 'text', text: '　' + label, size: 'xs', color: '#999999', wrap: true, flex: 5 }]
+      if (!isStr) contents.push({ type: 'text', text: '−$' + l.saved, size: 'xs', color: '#999999', align: 'end', flex: 2 })
+      rows.push({ type: 'box', layout: 'horizontal', contents })
+    })
+  }
+  // 口味偏好／備註接在品項後面、合計前面（老闆卡與客人卡共用，一改兩邊都到位）
+  rows.push(...flexPrefRows(r))
+  rows.push({ type: 'separator', margin: 'sm' })
+  rows.push({
+    type: 'box', layout: 'horizontal', margin: 'sm', contents: [
+      { type: 'text', text: '💰 合計', weight: 'bold', flex: 5 },
+      { type: 'text', text: '$' + r.total, weight: 'bold', align: 'end', flex: 2, color: '#B8860B' },
+    ],
+  })
+  return rows
+}
+
+// ---------- 客人卡片：訂單確認（跟老闆卡片同款對帳排版）----------
+function buildCustomerCard(r: any) {
+  return {
+    type: 'flex',
+    altText: '✅ 訂單確認！#' + r.order_no + '　' + fmtHM(r.pickup_at) + ' 取餐',
+    contents: {
+      type: 'bubble',
+      body: {
+        type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+          { type: 'text', text: '✅ 訂單確認！', weight: 'bold', size: 'lg', color: '#2E7D32' },
+          { type: 'text', text: '取餐編號 #' + r.order_no, size: 'sm', color: '#888888' },
+          { type: 'text', text: '食材新鮮現滷，等候時間約 ' + r.wait_minutes + ' 分鐘，請於 ' + fmtHM(r.pickup_at) + ' 前往現場取餐。', size: 'sm', wrap: true, margin: 'md' },
+          { type: 'separator', margin: 'md' },
+          { type: 'box', layout: 'horizontal', margin: 'md', contents: [
+            { type: 'text', text: '💰 合計', weight: 'bold', flex: 1 },
+            { type: 'text', text: '$' + r.total, weight: 'bold', align: 'end', color: '#B8860B' },
+          ] },
+          { type: 'text', text: '🍽 餐點明細請在點餐頁「我的訂單」查看', size: 'xs', color: '#999999', wrap: true, margin: 'md' },
+        ],
+      },
+    },
+  }
+}
+
+// ---------- 客人訊息：取餐時間更新（M3：改時間終於會通知了）----------
+function buildRetimedMessage(r: any, oldPickup?: string): string {
+  return '⏰ 取餐時間更新（取餐編號 #' + r.order_no + '）\n\n'
+    + '新的取餐時間：' + fmtHM(r.pickup_at)
+    + (oldPickup ? '（原 ' + fmtHM(oldPickup) + '）' : '') + '\n\n'
+    + '如有疑問請致電 0900-000-000'
+}
+
+// ---------- 客人卡片：訂單內容更新（同款對帳排版）----------
+function buildEditedCard(r: any, oldTotal?: number) {
+  const changed = (typeof oldTotal === 'number' && oldTotal !== r.total)
+  return {
+    type: 'flex',
+    altText: '✏️ 訂單內容更新 #' + r.order_no + '（合計 $' + r.total + '）',
+    contents: {
+      type: 'bubble',
+      body: {
+        type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+          { type: 'text', text: '✏️ 訂單內容更新', weight: 'bold', size: 'lg', color: '#B8860B' },
+          { type: 'text', text: '取餐編號 #' + r.order_no + (changed ? '（原合計 $' + oldTotal + '）' : ''), size: 'sm', color: '#888888' },
+          { type: 'separator', margin: 'md' },
+          { type: 'box', layout: 'horizontal', margin: 'md', contents: [
+            { type: 'text', text: '💰 新合計', weight: 'bold', flex: 1 },
+            { type: 'text', text: '$' + r.total, weight: 'bold', align: 'end', color: '#B8860B' },
+          ] },
+          { type: 'text', text: '🍽 更新後的餐點明細請在點餐頁「我的訂單」查看', size: 'xs', color: '#999999', wrap: true, margin: 'md' },
+          ...(r.pickup_at ? [{ type: 'text', text: '⏰ 取餐時間不變：' + fmtHM(r.pickup_at), size: 'xs', color: '#888888', margin: 'md', wrap: true }] : []),
+          { type: 'text', text: '如有疑問請致電 0900-000-000', size: 'xs', color: '#888888', wrap: true },
+        ],
+      },
+    },
+  }
+}
+
+// ---------- 老闆訊息：新訂單「按鈕卡片」（M2）----------
+// 需求限制：完成鍵必須能在 LINE 對話裡直接按，不能要求老闆額外開後台操作——
+// 所以新單直接給按鈕：✅25/30/35分＝一鍵接單；❌＝取消（會再問一次防手滑）。
+// ⚠️ 更正：客人推播已於 07-26 關閉（CUSTOMER_PUSH_ENABLED=false，省訊息額度），
+//    接單後【客人不會收到通知】，要自己到「訂單查詢」看取餐時間 → 卡片文案不可再寫「客人自動收到」。
+// 按鈕按下去由接待員（line-webhook）處理，只有名簿裡的老闆按了有效。
+function buildNewOrderCard(r: any, isRetry = false) {
+  // 對帳版排版統一走 flexItemRows——老闆卡片跟客人卡片同一份帳
+  // 按鈕文字只放「25分」三個字——三顆擠一排，帶 emoji 會被手機截成「2...」
+  const acceptBtn = (m: number) => ({
+    type: 'button', style: 'primary', height: 'sm', color: '#B8860B',
+    action: {
+      type: 'postback',
+      label: m + '分',
+      data: JSON.stringify({ a: 'ok', id: r.id, m }),
+      displayText: '接單 #' + r.order_no + '（等候 ' + m + ' 分鐘）',
+    },
+  })
+  return {
+    type: 'flex',
+    altText: (isRetry ? '🔁 補發通知 #' : '🔔 新訂單 #') + r.order_no + '（$' + r.total + '）',
+    contents: {
+      type: 'bubble',
+      body: {
+        type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+          // 補發的卡片要標出來——不然老闆會以為是新的一張單
+          { type: 'text', text: (isRetry ? '🔁 補發通知 #' : '🔔 新訂單 #') + r.order_no,
+            weight: 'bold', size: 'lg', color: isRetry ? '#C0703A' : '#B8860B' },
+          { type: 'text', text: '👤 ' + (r.customer_name ?? '') + '　📞 ' + (r.customer_phone ?? ''), size: 'sm', wrap: true },
+          { type: 'separator', margin: 'sm' },
+          ...flexItemRows(r, true),
+          { type: 'text', text: '👇 選等候分鐘＝接單（客人自己到「訂單查詢」看取餐時間）', size: 'xs', color: '#999999', wrap: true, margin: 'md' },
+        ],
+      },
+      footer: {
+        type: 'box', layout: 'vertical', spacing: 'sm', contents: [
+          { type: 'box', layout: 'horizontal', spacing: 'sm', contents: [25, 30, 35].map(acceptBtn) },
+          {
+            type: 'button', style: 'secondary', height: 'sm',
+            action: {
+              type: 'postback',
+              label: '❌ 取消這張單',
+              data: JSON.stringify({ a: 'no1', id: r.id }),
+              displayText: '取消 #' + r.order_no + '？',
+            },
+          },
+        ],
+      },
+    },
+  }
+}
+
+Deno.serve(async (req) => {
+  // 驗通行碼：不是自己人叫的，一律拒絕
+  if (req.headers.get('x-webhook-secret') !== WEBHOOK_SECRET) {
+    return new Response('forbidden', { status: 403 })
+  }
+
+  const { kind, record, old_total, old_pickup_at, retry } = await req.json()
+
+  /* 🔥 保溫請求（新增）：排程每 5 分鐘戳一次，讓這支函式不要進入休眠。
+     #015 的成因就是「29 分鐘沒人叫 → 睡著 → 叫不醒（503）」。
+     收到 ping 什麼事都不做，直接回 OK——重點只是「它醒過來了」，計時器歸零。 */
+  if (kind === 'ping') {
+    return new Response(JSON.stringify({ ok: true, pong: true }), {
+      headers: { 'content-type': 'application/json' },
+    })
+  }
+
+  // 🔕 客人主動通知總開關：目前不做主動通知，客人靠「我的訂單」自查
+  //    老闆的新單通知不受此開關影響（老闆一定要收單）。日後想開回來把它改 true 即可。
+  const CUSTOMER_PUSH_ENABLED = false
+
+  if (kind === 'new_order') {
+    // 撈出所有登記過的管理員，逐一發「按鈕卡片」（M2：接單直接在 LINE 按）——老闆通知，永遠開
+    const { data: admins } = await db.from('line_admins').select('line_user_id')
+    const card = buildNewOrderCard(record, !!retry)
+    const kindTag = retry ? 'retry' : 'new_order'   // 補發的標記成 retry，方便日後對帳
+    for (const a of admins ?? []) {
+      await pushMessages(a.line_user_id, [card], { orderNo: record?.order_no, kind: kindTag })
+    }
+  }
+
+  if (CUSTOMER_PUSH_ENABLED && kind === 'confirmed' && record?.line_user_id) {
+    await pushMessages(record.line_user_id, [buildCustomerCard(record)], { orderNo: record?.order_no, kind: 'confirmed' })
+  }
+
+  if (CUSTOMER_PUSH_ENABLED && kind === 'edited' && record?.line_user_id) {
+    await pushMessages(record.line_user_id, [buildEditedCard(record, old_total)], { orderNo: record?.order_no, kind: 'edited' })
+  }
+
+  if (CUSTOMER_PUSH_ENABLED && kind === 'retimed' && record?.line_user_id) {
+    await push(record.line_user_id, buildRetimedMessage(record, old_pickup_at), { orderNo: record?.order_no, kind: 'retimed' })
+  }
+
+  /* 🚫 棄單通知（新增）
+     刻意【不受 CUSTOMER_PUSH_ENABLED 管】——那個開關關掉的是「取餐進度」這種
+     客人自己在「訂單查詢」看得到的東西；棄單通知不一樣，客人不會主動去看，
+     而且這是老闆在看單台【一張一張手動選】才發的（不是自動洪水），額度可控。
+
+     ⚠️ 語氣是這整套裡最需要小心的地方：對方很可能只是臨時有事，不是壞人。
+     所以：先講事實、把損失講成店家承擔、給申訴管道，不責備。 */
+  if (kind === 'no_show' && record?.line_user_id) {
+    await push(record.line_user_id,
+      '您好，您於 ' + fmtDate(record.created_at) + ' 訂購的 #' + record.order_no
+      + ' 餐點已製作完成，但未前往取餐。\n\n'
+      + '餐點已無法保存，這次的損失由店家承擔。為維持出餐品質，'
+      + '您的線上訂餐將暫停 30 天，期間仍歡迎現場購買。\n\n'
+      + '若有誤會或特殊狀況，請直接回覆這則訊息與我們聯繫，謝謝您 🙏',
+      { orderNo: record?.order_no, kind: 'no_show' })
+  }
+
+  return new Response('ok')
+})
