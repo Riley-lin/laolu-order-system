@@ -19,28 +19,11 @@
 
 以下用虛構資料呈現一筆訂單從下單到完成的完整路徑：
 
-```mermaid
-flowchart LR
-    A[顧客 LINE 點餐] --> B[伺服器驗證身分與訂單]
-    B --> C[Supabase 儲存訂單]
-    C --> D[LINE 通知店主]
-    D --> E[店主接單與製作]
-    E --> F[顧客查詢訂單狀態]
-```
+<img src="assets/flow-order.png" alt="點餐流程圖：顧客 LINE 點餐，伺服器驗證身分與訂單，Supabase 儲存訂單，LINE 通知店主，店主接單與製作，顧客查詢訂單狀態" width="700">
 
 ## 系統架構
 
-```
-顧客（LIFF / 一般瀏覽器）                店主（Supabase Auth 登入）
-        │                                      │
-        ▼                                      ▼
-   index.html ──▶ place-order ──▶ Postgres（RLS） ◀── boss.html
-                   （下單守門員）        │
-                                        ▼（資料庫觸發器）
-                                   line-push ──▶ LINE Messaging API
-                                        ▲
-                                 line-webhook ◀── 老闆端按鈕回覆／好友綁定
-```
+<img src="assets/flow-architecture.png" alt="系統架構圖：顧客端經 index.html 與 place-order 寫入 Postgres，店主端經 boss.html 讀寫 Postgres，資料庫觸發器通知 line-push 發送 LINE Messaging API，line-webhook 接收老闆端按鈕回覆與好友綁定" width="500">
 
 - **place-order**：驗證 LINE 身分、限流與高額下單警示、冪等防重複送單；具備 Turnstile 人機驗證機制（因 LINE 內嵌瀏覽器相容性考量，目前停用）
 - **line-push**：新訂單一律通知店主；顧客端的訂單狀態推播已實作但目前停用，顧客以「訂單查詢」主動確認進度，棄單通知則不受此限制
